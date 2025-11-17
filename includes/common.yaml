@@ -1,0 +1,34 @@
+logger:
+  level: ${logger_level}
+
+preferences:
+  flash_write_interval: 1min
+
+web_server:
+  local: false
+  version: 3
+  ota: false
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret sensortest_api_key
+  on_client_connected:
+    - logger.log:
+        format: "Client %s connected to API with IP %s"
+        args: ["client_info.c_str()", "client_address.c_str()"]
+  on_client_disconnected:
+    - logger.log: "API client disconnected"
+
+mdns:
+  disabled: false
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+switch:
+  - platform: restart
+    name: Reboot
+    id: reboot_switch

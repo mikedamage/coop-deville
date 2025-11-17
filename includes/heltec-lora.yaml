@@ -1,0 +1,64 @@
+spi:
+  clk_pin: GPIO9
+  mosi_pin: GPIO10
+  miso_pin: GPIO11
+  interface: hardware
+
+# LoRa radio chip config:
+sx126x:
+  - id: ${lora_module_id}
+    cs_pin: GPIO8
+    rst_pin: GPIO12
+    busy_pin: GPIO13
+    dio1_pin: GPIO14
+    pa_power: ${lora_pa_power}
+    bandwidth: ${lora_bandwidth}
+    modulation: LORA
+    crc_enable: true
+    frequency: ${lora_frequency}
+    hw_version: sx1262
+    rf_switch: false
+    spreading_factor: ${lora_spreading_factor}
+    coding_rate: ${lora_coding_rate}
+    tcxo_voltage: 1_8V
+    tcxo_delay: 5ms
+    sync_value: [0x14, 0x24]
+    on_packet:
+      then:
+        - lambda: |-
+            ESP_LOGD("lambda", "packet: %s", format_hex(x).c_str());
+            ESP_LOGD("lambda", "rssi %.2f", rssi);
+            ESP_LOGD("lambda", "snr %.2f", snr);
+            id(lora_rssi).publish_state(rssi);
+            id(lora_snr).publish_state(snr);
+            id(packet_rx_count) += 1;
+
+globals:
+  - id: packet_rx_count
+    type: int
+    initial_value: '0'
+    restore_value: no
+
+interval:
+  - interval: 1min
+    then:
+      - lambda: |-
+          id(packets_per_minute).publish_state(id(packet_rx_count));
+          id(packet_rx_count) = 0;
+
+sensor:
+  - platform: template
+    name: LoRa RSSI
+    id: lora_rssi
+    entity_category: diagnostic
+
+  - platform: template
+    name: LoRa SNR
+    id: lora_snr
+    entity_category: diagnostic
+
+  - platform: template
+    name: Rx Packets per Minute
+    id: packets_per_minute
+    entity_category: diagnostic
+

@@ -1,0 +1,33 @@
+sensor:
+  - platform: wifi_signal
+    id: wifi_signal_db
+    name: WiFi Signal dB
+    entity_category: diagnostic
+    update_interval: 60s
+
+  - platform: copy
+    source_id: wifi_signal_db
+    name: WiFi Signal Percent
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "Signal %"
+    entity_category: diagnostic
+    device_class: ""
+
+  - platform: internal_temperature
+    name: "CPU Temperature"
+    entity_category: diagnostic
+
+text_sensor:
+  - platform: uptime
+    name: uptime
+    format:
+      separator: " "
+  - platform: wifi_info
+    ip_address:
+      name: IP Address
+      update_interval: 180s
+    ssid:
+      name: Connected SSID
+    scan_results:
+      name: Latest scan results

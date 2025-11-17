@@ -1,0 +1,23 @@
+esphome:
+  on_boot:
+    - priority: 1000
+      then:
+        lambda: |-
+          // Initialize OLED display
+          pinMode(36, OUTPUT);
+          digitalWrite(36, LOW);
+          delay(100);
+
+# See: https://github.com/PaulSchulz/esphome-esp32s3/blob/main/heltec-wifi-lora-32-v3.yaml
+i2c:
+  - id: display_bus
+    sda: 17
+    scl: 18
+
+display:
+  - platform: ssd1306_i2c
+    id: builtin_display
+    model: "SSD1306 128x64"
+    reset_pin: 21
+    i2c_id: display_bus
+    address: 0x3C

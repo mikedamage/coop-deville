@@ -1,0 +1,305 @@
+external_components:
+  - source:
+      type: local
+      path: components
+
+substitutions:
+  name: lora-gateway
+  logger_level: DEBUG
+  friendly_name: LoRa Gateway
+  lora_module_id: sx126x_module
+  lora_pa_power: 10
+  lora_bandwidth: 125_0kHz
+  lora_frequency: 917500000 # 917.5 MHz
+  lora_spreading_factor: 7
+  lora_coding_rate: CR_4_5
+
+packages:
+  # - !include includes/debug.yaml
+  - !include includes/common.yaml
+  - !include includes/ha-time.yaml
+  - !include includes/diagnostic-sensors.yaml
+  - !include includes/heltec-lora.yaml
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  area: Indoor
+  includes:
+    - includes/charging_helpers.h
+
+esp32:
+  board: heltec_wifi_lora_32_V3
+  variant: esp32s3
+  cpu_frequency: 160MHz
+  flash_size: 8MB
+  framework:
+    type: arduino
+    version: "3.3.2"
+
+wifi:
+  networks:
+    - ssid: !secret outdoor_wifi_ssid
+      password: !secret wifi_password
+    - ssid: !secret outdoor_wifi_ssid_2
+      password: !secret wifi_password
+  power_save_mode: NONE
+  output_power: 20dB
+
+  # fallback hotspot if WiFi fails
+  ap:
+    ssid: ${friendly_name} Fallback
+    password: !secret hotspot_password
+
+# udp:
+#   - id: udp_link
+
+# Packet transport acts as a gateway - receives from other devices
+# and forwards to Home Assistant via API
+packet_transport:
+  - id: lora_packet_transport
+    # platform: udp
+    # udp_id: udp_link
+    platform: sx126x
+    sx126x_id: ${lora_module_id}
+    encryption: !secret packet_transport_key
+    update_interval: 60s
+    providers:
+      - name: chicken-tractor
+        encryption: !secret packet_transport_key
+    binary_sensors:
+      - charge_control
+      - reverse_protect_control
+      - load_control
+
+text_sensor:
+  - platform: template
+    id: charge_phase_str
+    name: "Charge Phase"
+
+# Sensors received from chicken-tractor via LoRa
+sensor:
+  - platform: packet_transport
+    provider: chicken-tractor
+    name: "Coop Controller Uptime"
+    id: uptime_seconds
+    unit_of_measurement: "seconds"
+    accuracy_decimals: 0
+
+    internal: false
+  - platform: packet_transport
+    provider: chicken-tractor
+    name: "Coop Battery Voltage"
+    id: battery_voltage
+    internal: false
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    device_class: voltage
+    state_class: measurement
+
+  - platform: packet_transport
+    provider: chicken-tractor
+    id: charge_phase_int
+    internal: true
+    on_value:
+      - then:
+          lambda: |-
+            int phase = (int)x;
+            std::string phase_str = "OFF";
+
+            switch(phase) {
+              case Off:
+                phase_str = "OFF";
+                break;
+              case Discharging:
+                phase_str = "DISCHARGING";
+                break;
+              case Bulk:
+                phase_str = "BULK";
+                break;
+              case Absorption:
+                phase_str = "ABSORPTION";
+                break;
+              case Float:
+                phase_str = "FLOAT";
+                break;
+            }
+
+            id(charge_phase_str).publish_state(phase_str);
+
+
+  - platform: packet_transport
+    provider: chicken-tractor
+    name: "Coop Charge Current"
+    id: charge_current
+    internal: false
+    unit_of_measurement: "A"
+    accuracy_decimals: 2
+    device_class: current
+    state_class: measurement
+
+  - platform: packet_transport
+    provider: chicken-tractor
+    name: "Coop Solar Voltage"
+    id: solar_voltage
+    internal: false
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    device_class: voltage
+    state_class: measurement
+
+  - platform: packet_transport
+    provider: chicken-tractor
+    name: "Coop Load Current"
+    id: load_current
+    internal: false
+    unit_of_measurement: "A"
+    accuracy_decimals: 2
+    device_class: current
+    state_class: measurement
+
+  - platform: packet_transport
+    provider: chicken-tractor
+    name: "Coop Load Voltage"
+    id: load_voltage
+    internal: false
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    device_class: voltage
+    state_class: measurement
+
+  - platform: packet_transport
+    provider: chicken-tractor
+    name: "Coop Charging Duty Cycle"
+    id: charger_duty_cycle
+    internal: false
+    unit_of_measurement: "%"
+    accuracy_decimals: 2
+    state_class: measurement
+
+  # Calculated sensors (computed locally to reduce LoRa packet size)
+  - platform: template
+    name: "Coop Charge Power"
+    id: charge_power
+    unit_of_measurement: "W"
+    accuracy_decimals: 2
+    device_class: power
+    state_class: measurement
+    lambda: |-
+      return id(battery_voltage).state * id(charge_current).state;
+    update_interval: 10s
+
+  - platform: template
+    name: "Coop Load Power"
+    id: load_power
+    unit_of_measurement: "W"
+    accuracy_decimals: 2
+    device_class: power
+    state_class: measurement
+    lambda: |-
+      return id(load_voltage).state * id(load_current).state;
+    update_interval: 10s
+
+  - platform: heltec_battery_sensor
+    update_interval: 5s
+    battery_voltage:
+      id: gateway_battery_voltage
+      name: Gateway Battery Voltage
+      entity_category: diagnostic
+      device_class: voltage
+      state_class: measurement
+      accuracy_decimals: 2
+      filters:
+        - calibrate_linear:
+            datapoints:
+              - 3.67 -> 3.58
+              - 3.97 -> 3.87
+              - 4.08 -> 3.96
+              - 4.15 -> 4.01
+              - 4.33 -> 4.20
+        - sliding_window_moving_average:
+            window_size: 10
+            send_every: 10
+    battery_level:
+      id: battery_level
+      name: Gateway Battery Level
+      entity_category: diagnostic
+      filters:
+        - clamp:
+            min_value: 0.0
+            max_value: 100.0
+        - sliding_window_moving_average:
+            window_size: 12
+            send_every: 12
+
+binary_sensor:
+  # Status sensors received from chicken-tractor
+  - platform: packet_transport
+    provider: chicken-tractor
+    name: "Coop Reverse Protection State"
+    id: reverse_protect_state
+    internal: false
+    device_class: running
+
+  - platform: packet_transport
+    provider: chicken-tractor
+    name: "Coop Load Enable State"
+    id: load_switch_state
+    internal: false
+    device_class: running
+
+  - platform: packet_transport
+    provider: chicken-tractor
+    name: "Coop Charge Enable State"
+    id: charge_switch_state
+    internal: false
+    device_class: running
+
+  # Control binary sensors that mirror the control switches
+  - platform: template
+    name: "Coop Charge Control Signal"
+    id: charge_control
+    internal: true
+    lambda: |-
+      return id(charge_control_switch).state;
+
+  - platform: template
+    name: "Coop Reverse Protection Control Signal"
+    id: reverse_protect_control
+    internal: true
+    lambda: |-
+      return id(reverse_protect_control_switch).state;
+
+  - platform: template
+    name: "Coop Load Control Signal"
+    id: load_control
+    internal: true
+    lambda: |-
+      return id(load_control_switch).state;
+
+# Control switches for user interaction
+switch:
+  - platform: template
+    name: "Coop Charge Enable"
+    id: charge_control_switch
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: template
+    name: "Coop Reverse Protection"
+    id: reverse_protect_control_switch
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: template
+    name: "Coop Light"
+    id: load_control_switch
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: template
+    id: remote_reboot
+    name: "Reboot Coop Controller"
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+

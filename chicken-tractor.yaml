@@ -1,0 +1,615 @@
+substitutions:
+  name: chicken-tractor
+  logger_level: DEBUG
+  friendly_name: Chicken Tractor
+  lora_module_id: sx126x_module
+  lora_pa_power: 10
+  lora_bandwidth: 125_0kHz
+  lora_frequency: 917500000 # 917.5 MHz
+  lora_spreading_factor: 7
+  lora_coding_rate: CR_4_5
+
+packages:
+  - !include includes/common.yaml
+  # - !include includes/debug.yaml
+  - !include includes/ha-time.yaml
+  - !include includes/diagnostic-sensors.yaml
+  - !include includes/heltec-display.yaml
+  - !include includes/heltec-lora.yaml
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  area: Pasture
+  includes:
+    - includes/temperature.h
+    - includes/charging_helpers.h
+  on_boot:
+    - priority: 300
+      then:
+        - logger.log: 'Turning on display after boot for 60s'
+        - lambda: 'id(display_on) = true;'
+        - delay: 60s
+        - lambda: 'id(display_on) = false;'
+
+esp32:
+  board: heltec_wifi_lora_32_V3
+  variant: esp32s3
+  cpu_frequency: 160MHz
+  flash_size: 8MB
+  framework:
+    # type: esp-idf
+    type: arduino
+    version: "3.3.2"
+
+api:
+  reboot_timeout: 0s
+
+wifi:
+  networks:
+    - ssid: !secret outdoor_wifi_ssid
+      password: !secret wifi_password
+    - ssid: !secret outdoor_wifi_ssid_2
+      password: !secret wifi_password
+  power_save_mode: LIGHT
+  output_power: 20dB
+  # fast_connect: true
+  reboot_timeout: 0s
+  manual_ip:
+    static_ip: 192.168.1.135
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+
+  # fallback hotspot when no networks in range
+  ap:
+    ssid: ${friendly_name}
+    password: !secret hotspot_password
+
+# one_wire:
+#   - platform: gpio
+#     id: one_wire_bus
+#     pin: GPIO47
+#
+
+font:
+  - file: "gfonts://Roboto+Mono"
+    size: 10
+    id: roboto_10
+  - file: "gfonts://Material+Symbols+Outlined"
+    id: material_symbols_14
+    size: 14
+    glyphs:
+      - "\U0000EC0F" # solar_power
+      - "\U0000E2AE" # charger (voltage)
+      - "\U0000E29C" # airwave (current)
+      - "\U0000F250" # battery_android_frame_bolt
+      - "\U0000F24C" # battery_android_frame_share
+      - "\U0000E669" # radio icon
+      - "\U0000E9B8" # light bulb off (load off)
+      - "\U0000E0F0" # light bulb (load on)
+
+display:
+  - id: !extend builtin_display
+    lambda: |-
+      if (!id(display_on)) {
+        it.fill(COLOR_OFF);
+      } else {
+        it.print(0, 0, id(material_symbols_14), "\U0000F250");
+        it.printf(16, 0, id(roboto_10), "%6.2fV", id(battery_voltage).state);
+        it.print(it.get_width() - 16, 0, id(material_symbols_14), id(load_switch).state ? "\U0000E0F0" : "\U0000E9B8");
+        it.print(0, 15, id(material_symbols_14), "\U0000F24C");
+        it.printf(16, 15, id(roboto_10), "%6.2fA", id(charge_current).state);
+        it.print(0, 30, id(material_symbols_14), "\U0000EC0F");
+        it.printf(16, 30, id(roboto_10), "%6.2fV", id(solar_voltage).state);
+        it.printf(0, 45, id(roboto_10), "RP: %d, Chg PWM: %d", id(reverse_protect).state, id(charge_manual_override) ? 0 : id(pwm_duty));
+      }
+
+packet_transport:
+  - id: lora_packet_transport
+    platform: sx126x
+    sx126x_id: ${lora_module_id}
+    encryption: !secret packet_transport_key
+    update_interval: 30s
+    providers:
+      - name: lora-gateway
+        encryption: !secret packet_transport_key
+    sensors:
+      - battery_voltage
+      - charge_current
+      - solar_voltage
+      - load_current
+      - load_voltage
+      - charger_duty_cycle
+      - charge_phase_int
+      - uptime_seconds
+    binary_sensors:
+      - reverse_protect_state
+      - load_switch_state
+      - charge_switch_state
+
+# i2c for INA219 current sensor and BH1750 ambient light sensor
+i2c:
+  - sda: GPIO1
+    scl: GPIO2
+    id: sensor_bus
+    scan: true
+
+sun:
+  latitude: !secret location_latitude
+  longitude: !secret location_longitude
+
+sensor:
+  - platform: uptime
+    name: "Uptime (seconds)"
+    id: uptime_seconds
+    entity_category: diagnostic
+    update_interval: 60s
+
+  - platform: sun
+    name: Solar Elevation
+    type: elevation
+    id: sun_elevation
+    internal: true
+    icon: "mdi:sun-angle"
+
+  - platform: sun
+    name: Solar Azimuth
+    type: azimuth
+    id: sun_azimuth
+    internal: true
+    icon: "mdi:sun-compass"
+
+  - platform: template
+    name: "Charging Duty Cycle"
+    id: charger_duty_cycle
+    unit_of_measurement: "%"
+    accuracy_decimals: 2
+    lambda: |-
+      return id(pwm_duty) / 255.0 * 100.0;
+    filters:
+      - throttle: 30s
+
+  - platform: template
+    name: "Charge Phase"
+    id: charge_phase_int
+
+  - platform: ina219
+    address: 0x40
+    i2c_id: sensor_bus
+    shunt_resistance: 0.1 ohm
+    max_voltage: 14.8V
+    max_current: 3.2A
+    current:
+      id: charge_current
+      name: "Charge Current"
+      unit_of_measurement: "A"
+      accuracy_decimals: 2
+      filters:
+        - throttle: 30s
+    bus_voltage:
+      name: "Charge Voltage"
+      unit_of_measurement: "V"
+      accuracy_decimals: 2
+      id: battery_voltage
+      filters:
+        - throttle: 30s
+    shunt_voltage:
+      name: "Charge Shunt Voltage"
+      id: shunt_voltage
+      unit_of_measurement: "V"
+      filters:
+        - throttle: 30s
+    power:
+      name: "Charge Power"
+      unit_of_measurement: "W"
+      accuracy_decimals: 2
+      id: charge_power
+      filters:
+        - throttle: 30s
+    update_interval: 5s
+
+  - platform: ina219
+    address: 0x41
+    i2c_id: sensor_bus
+    shunt_resistance: 0.1 ohm
+    max_voltage: 14.8V
+    max_current: 2.0A
+    current:
+      id: load_current
+      name: "Load Current"
+      unit_of_measurement: "A"
+      accuracy_decimals: 2
+      filters:
+        - throttle: 30s
+    bus_voltage:
+      name: "Load Voltage"
+      unit_of_measurement: "V"
+      accuracy_decimals: 2
+      id: load_voltage
+      filters:
+        - throttle: 30s
+    shunt_voltage:
+      name: "Load Shunt Voltage"
+      id: load_shunt_voltage
+      unit_of_measurement: "V"
+      filters:
+        - throttle: 30s
+    power:
+      name: "Load Power"
+      unit_of_measurement: "W"
+      accuracy_decimals: 2
+      id: load_power
+      filters:
+        - throttle: 30s
+    update_interval: 5s
+
+  - platform: adc
+    pin: GPIO3
+    name: "Solar Voltage"
+    unit_of_measurement: "V"
+    update_interval: 5s
+    attenuation: 12db
+    filters:
+      - throttle: 30s
+      - multiply: 11.0  # Voltage divider ratio (220k + 22k) / 22k
+    id: solar_voltage
+    on_value_range:
+      - above: !lambda 'return id(battery_voltage).state + 0.5;'
+        then:
+          - if:
+              condition:
+                - switch.is_off: reverse_protect
+              then:
+                - logger.log:
+                    format: "Opening reverse protection gate (VSolar: %.2f, VBat: %.2f)"
+                    args: ['id(solar_voltage).state', 'id(battery_voltage).state']
+                - switch.turn_on: reverse_protect
+      - below: !lambda 'return id(battery_voltage).state + 0.49;'
+        then:
+          - if:
+              condition:
+                - switch.is_on: reverse_protect
+              then:
+                - logger.log:
+                    format: "Closing reverse protection gste (VSolar: %.2f, VBat: %.2f)"
+                    args: ['id(solar_voltage).state', 'id(battery_voltage).state']
+                - switch.turn_off: reverse_protect
+
+  # - platform: dallas_temp
+  #   name: "Ambient Temperature"
+  #   unit_of_measurement: "°C"
+  #   accuracy_decimals: 2
+  #   update_interval: 60s
+  #   one_wire_id: one_wire_bus
+  #   id: ambient_temp
+  #   icon: "mdi:thermometer"
+
+  # - platform: bh1750
+  #   i2c_id: sensor_bus
+  #   name: "Ambient Light"
+  #   address: 0x23  # Default, change to 0x5C if ADDR pin is high
+  #   update_interval: 60s
+  #   id: ambient_light
+
+# Outputs for MOSFET control (receivable via packet_transport)
+output:
+  - platform: ledc
+    pin: GPIO4
+    id: charge_pwm
+    frequency: 1000Hz
+
+  - platform: gpio
+    pin: GPIO48
+    id: reverse_protect_output
+    inverted: false
+
+  - platform: gpio
+    pin: GPIO45
+    id: load_switch_output
+    inverted: false
+
+# Switches for manual/remote control (forwarded/received via packet_transport)
+switch:
+  - platform: output
+    name: "Charge Enable"
+    output: charge_pwm
+    id: charge_switch
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+      - output.set_level:
+          id: charge_pwm
+          level: 0%
+      - globals.set:
+          id: charge_manual_override
+          value: 'true'
+      - logger.log: "Charge enable switch manually turned OFF - setting override flag"
+    on_turn_on:
+      - globals.set:
+          id: charge_manual_override
+          value: 'false'
+      - logger.log: "Charge enable switch manually turned ON - clearing override flag"
+
+  - platform: output
+    name: "Reverse Protection"
+    output: reverse_protect_output
+    id: reverse_protect
+    restore_mode: ALWAYS_OFF
+
+  - platform: output
+    name: "Load Enable"
+    output: load_switch_output
+    id: load_switch
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_off:
+      - globals.set:
+          id: load_manual_override
+          value: 'true'
+      - logger.log: "Load switch manually turned OFF - setting override flag"
+    on_turn_on:
+      - globals.set:
+          id: load_manual_override
+          value: 'false'
+      - logger.log: "Load switch manually turned ON - clearing override flag"
+
+# Binary sensor for status
+binary_sensor:
+  - platform: status
+    name: "ESP Status"
+
+  - platform: template
+    name: "Reverse Protection State"
+    id: reverse_protect_state
+    lambda: |-
+      return id(reverse_protect).state;
+
+  - platform: template
+    name: "Load Enable State"
+    id: load_switch_state
+    lambda: |-
+      return id(load_switch).state;
+
+  - platform: template
+    name: "Charge Enable State"
+    id: charge_switch_state
+    lambda: |-
+      return id(charge_switch).state;
+
+  - platform: template
+    id: remote_reboot
+    internal: true
+    on_press:
+      - switch.turn_on: reboot_switch
+
+  # Control signals received from gateway
+  - platform: packet_transport
+    provider: lora-gateway
+    id: charge_control
+    internal: true
+    on_press:
+      - switch.turn_on: charge_switch
+    on_release:
+      - switch.turn_off: charge_switch
+
+  - platform: packet_transport
+    provider: lora-gateway
+    id: reverse_protect_control
+    internal: true
+    on_press:
+      - switch.turn_on: reverse_protect
+    on_release:
+      - switch.turn_off: reverse_protect
+
+  - platform: packet_transport
+    provider: lora-gateway
+    id: load_control
+    internal: true
+    on_press:
+      - switch.turn_on: load_switch
+    on_release:
+      - switch.turn_off: load_switch
+
+  - platform: gpio
+    pin: GPIO0
+    id: display_toggle
+    filters:
+      - delayed_on: 10ms
+    on_press:
+      then:
+        - logger.log: 'Display toggle button pressed'
+        - if:
+            condition:
+              lambda: 'return id(display_on);'
+            then:
+              - logger.log: 'Turning display off'
+              - lambda: 'id(display_on) = false;'
+            else:
+              - logger.log: 'Turning display on for 60s'
+              - lambda: 'id(display_on) = true;'
+              - delay: 60s
+              - logger.log: 'Sleeping display after 60s delay'
+              - lambda: 'id(display_on) = false;'
+
+text_sensor:
+  - platform: template
+    name: "Charge Phase"
+    id: charge_phase_sensor
+    icon: "mdi:battery-charging"
+
+interval:
+  - interval: 5s
+    then:
+      - script.execute:
+          id: duty_cycle_management
+          battery_voltage: !lambda 'return id(battery_voltage).state;'
+          charge_current: !lambda 'return id(charge_current).state;'
+          solar_voltage: !lambda 'return id(solar_voltage).state;'
+          charge_power: !lambda 'return id(charge_power).state;'
+
+globals:
+  - id: prev_power
+    type: float
+    initial_value: '0.0'
+    restore_value: no
+
+  - id: pwm_duty
+    type: int
+    initial_value: '128'
+    restore_value: no
+
+  - id: charge_manual_override
+    type: bool
+    initial_value: 'true'
+    restore_value: yes
+
+  - id: display_on
+    type: bool
+    initial_value: 'true'
+    restore_value: no
+
+  - id: load_manual_override
+    type: bool
+    initial_value: 'false'
+    restore_value: yes
+
+  - id: charge_phase
+    type: std::string
+    initial_value: '"OFF"'
+    restore_value: no
+
+script:
+  - id: duty_cycle_management
+    mode: single
+    parameters:
+      charge_current: float
+      battery_voltage: float
+      solar_voltage: float
+      charge_power: float
+    then:
+      - lambda: |-
+          // ========== PHASE DETERMINATION ==========
+          std::string new_phase = "OFF";
+          ChargePhase new_phase_int = Off;
+
+          // Check if charging is manually disabled
+          if (id(charge_manual_override)) {
+            new_phase = "OFF";
+            new_phase_int = Off;
+          }
+          // Check if reverse protection is off (no solar available)
+          else if (!id(reverse_protect).state) {
+            new_phase = "DISCHARGING";
+            new_phase_int = Discharging;
+          }
+          // Solar available and charging enabled - determine phase by voltage
+          else {
+            if (battery_voltage < 14.2) {
+              new_phase = "BULK";
+              new_phase_int = Bulk;
+            } else if (battery_voltage < 14.6) {
+              new_phase = "ABSORPTION";
+              new_phase_int = Absorption;
+            } else {
+              new_phase = "FLOAT";
+              new_phase_int = Float;
+            }
+          }
+
+          // Update phase if changed
+          if (id(charge_phase) != new_phase) {
+            ESP_LOGI("charger", "Phase transition: %s -> %s (Vbat=%.2fV)",
+                     id(charge_phase).c_str(), new_phase.c_str(), battery_voltage);
+            id(charge_phase) = new_phase;
+            id(charge_phase_sensor).publish_state(new_phase);
+            id(charge_phase_int).publish_state(new_phase_int);
+          }
+
+          // ========== PWM CONTROL BY PHASE ==========
+          if (new_phase == "OFF" || new_phase == "DISCHARGING") {
+            // No charging - set PWM to zero
+            if (id(pwm_duty) != 0) {
+              id(pwm_duty) = 0;
+              id(charge_pwm).set_level(0);
+              ESP_LOGD("charger", "Charging disabled: %s", new_phase.c_str());
+            }
+          }
+          else if (new_phase == "BULK") {
+            // BULK: Maximize power using perturb-and-observe MPPT
+            float current_power = battery_voltage * charge_current;
+
+            if (current_power > id(prev_power)) {
+              id(pwm_duty) += 5;
+            } else {
+              id(pwm_duty) -= 5;
+            }
+
+            // Constrain to reasonable range (min 20% to keep things moving)
+            id(pwm_duty) = constrain(id(pwm_duty), 50, 255);
+
+            // Safety limit: reduce if current exceeds 2A
+            if (charge_current > 2.0) {
+              id(pwm_duty) -= 10;
+            }
+
+            float duty = (float)id(pwm_duty) / 255.0;
+            id(charge_pwm).set_level(duty);
+            ESP_LOGD("charger", "BULK: PWM=%.2f, Power=%.2fW, Vbat=%.2fV, I=%.2fA",
+                     duty, current_power, battery_voltage, charge_current);
+            id(prev_power) = current_power;
+          }
+          else if (new_phase == "ABSORPTION") {
+            // ABSORPTION: Hold voltage at ~14.4V (between 14.2-14.6V)
+            if (battery_voltage > 14.5) {
+              id(pwm_duty) -= 3;  // Reduce charging
+            } else if (battery_voltage < 14.3) {
+              id(pwm_duty) += 3;  // Increase charging
+            }
+            // else: voltage is in sweet spot, maintain current PWM
+
+            id(pwm_duty) = constrain(id(pwm_duty), 10, 200);
+
+            float duty = (float)id(pwm_duty) / 255.0;
+            id(charge_pwm).set_level(duty);
+            ESP_LOGD("charger", "ABSORPTION: PWM=%.2f, Vbat=%.2fV, I=%.2fA",
+                     duty, battery_voltage, charge_current);
+          }
+          else if (new_phase == "FLOAT") {
+            // FLOAT: Maintain battery at ~13.6V for trickle charge
+            if (battery_voltage > 13.7) {
+              id(pwm_duty) -= 3;
+            } else if (battery_voltage < 13.5) {
+              id(pwm_duty) += 3;
+            }
+
+            id(pwm_duty) = constrain(id(pwm_duty), 0, 80);  // Low PWM for float
+
+            float duty = (float)id(pwm_duty) / 255.0;
+            id(charge_pwm).set_level(duty);
+            ESP_LOGD("charger", "FLOAT: PWM=%.2f, Vbat=%.2fV, I=%.2fA",
+                     duty, battery_voltage, charge_current);
+          }
+
+      # Load management - turn off if battery too low
+      - if:
+          condition:
+            and:
+              - switch.is_on: load_switch
+              - lambda: 'return battery_voltage < 10.8;'
+          then:
+            - switch.turn_off: load_switch
+            - logger.log:
+                format: "Low battery voltage (%.2f < 10.8V). Turning off load switch."
+                args: ['battery_voltage']
+
+      # Load management - turn back on when battery recovered
+      - if:
+          condition:
+            and:
+              - switch.is_off: load_switch
+              - lambda: 'return battery_voltage > 12.0;'
+              - lambda: 'return !id(load_manual_override);'
+          then:
+            - switch.turn_on: load_switch
+            - logger.log:
+                format: "Battery voltage nominal (%.2f >= 12.0V) - turning on load switch"
+                args: ['battery_voltage']
+
