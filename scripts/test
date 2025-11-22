@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Test runner script for coop-deville ESPHome components
+# Compiles all test configurations in the tests/ directory
+
+set -e
+
+cd "$(dirname "$0")/.."
+
+# Parse arguments
+CLEAN=false
+VERBOSE=false
+SPECIFIC_TEST=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -c|--clean)
+            CLEAN=true
+            shift
+            ;;
+        -v|--verbose)
+            VERBOSE=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS] [TEST_FILE]"
+            echo ""
+            echo "Options:"
+            echo "  -c, --clean     Clean build directories before compiling"
+            echo "  -v, --verbose   Show verbose output"
+            echo "  -h, --help      Show this help message"
+            echo ""
+            echo "If TEST_FILE is specified, only that test will be run."
+            echo "Otherwise, all tests/test*.yaml files will be compiled."
+            exit 0
+            ;;
+        *)
+            SPECIFIC_TEST="$1"
+            shift
+            ;;
+    esac
+done
+
+if [ "$VERBOSE" = true ]; then
+    set -x
+fi
+
+# Determine which tests to run
+if [ -n "$SPECIFIC_TEST" ]; then
+    TEST_FILES=("$SPECIFIC_TEST")
+else
+    TEST_FILES=(./tests/test*.yaml)
+fi
+
+# Track results
+PASSED=0
+FAILED=0
+FAILED_TESTS=()
+
+echo "========================================"
+echo "Running ESPHome component tests"
+echo "========================================"
+echo ""
+
+for f in "${TEST_FILES[@]}"; do
+    if [ ! -f "$f" ]; then
+        echo "Warning: Test file not found: $f"
+        continue
+    fi
+
+    TEST_NAME=$(basename "$f" .yaml)
+    echo "----------------------------------------"
+    echo "Testing: $TEST_NAME"
+    echo "----------------------------------------"
+
+    if [ "$CLEAN" = true ]; then
+        echo "Cleaning build directory..."
+        esphome clean "$f" 2>/dev/null || true
+    fi
+
+    if esphome compile "$f"; then
+        echo "PASSED: $TEST_NAME"
+        ((PASSED++))
+    else
+        echo "FAILED: $TEST_NAME"
+        ((FAILED++))
+        FAILED_TESTS+=("$TEST_NAME")
+    fi
+    echo ""
+done
+
+echo "========================================"
+echo "Test Results"
+echo "========================================"
+echo "Passed: $PASSED"
+echo "Failed: $FAILED"
+
+if [ ${#FAILED_TESTS[@]} -gt 0 ]; then
+    echo ""
+    echo "Failed tests:"
+    for test in "${FAILED_TESTS[@]}"; do
+        echo "  - $test"
+    done
+    exit 1
+fi
+
+echo ""
+echo "All tests passed!"
+exit 0

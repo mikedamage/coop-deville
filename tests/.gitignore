@@ -3,7 +3,3 @@
 # You can modify this file to suit your needs.
 /.esphome/
 /secrets.yaml
-__pycache__
-CLAUDE.local.md
-FEATURE_PLAN_PROMPT.md
-settings.local.json

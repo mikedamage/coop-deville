@@ -1,0 +1,100 @@
+# Test configuration for lora_remote_node component
+# This is used to verify Phase 1 compiles correctly
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+substitutions:
+  name: test-lora-remote
+  logger_level: DEBUG
+  friendly_name: Test LoRa Remote Node
+  lora_module_id: sx126x_module
+  lora_pa_power: "10"
+  lora_bandwidth: 125_0kHz
+  lora_frequency: "917500000"
+  lora_spreading_factor: "7"
+  lora_coding_rate: CR_4_5
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: heltec_wifi_lora_32_V3
+  variant: esp32s3
+  framework:
+    type: arduino
+
+logger:
+  level: ${logger_level}
+
+# WiFi not needed for compile test, but required for api
+wifi:
+  ssid: "TestNetwork"
+  password: "testpassword"
+
+api:
+
+spi:
+  clk_pin: GPIO9
+  mosi_pin: GPIO10
+  miso_pin: GPIO11
+  interface: hardware
+
+sx126x:
+  - id: ${lora_module_id}
+    cs_pin: GPIO8
+    rst_pin: GPIO12
+    busy_pin: GPIO13
+    dio1_pin: GPIO14
+    pa_power: ${lora_pa_power}
+    bandwidth: ${lora_bandwidth}
+    modulation: LORA
+    crc_enable: true
+    frequency: ${lora_frequency}
+    hw_version: sx1262
+    rf_switch: false
+    spreading_factor: ${lora_spreading_factor}
+    coding_rate: ${lora_coding_rate}
+    tcxo_voltage: 1_8V
+    tcxo_delay: 5ms
+    sync_value: [0x14, 0x24]
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: America/New_York
+
+# Test sensors to be reported via lora_remote_node
+sensor:
+  - platform: template
+    name: Test Battery Voltage
+    id: test_battery_voltage
+    unit_of_measurement: V
+    lambda: return 12.5;
+    update_interval: 10s
+
+  - platform: template
+    name: Test Solar Voltage
+    id: test_solar_voltage
+    unit_of_measurement: V
+    lambda: return 18.3;
+    update_interval: 10s
+
+binary_sensor:
+  - platform: template
+    name: Test Load State
+    id: test_load_state
+    lambda: return true;
+
+lora_remote_node:
+  sx126x_id: ${lora_module_id}
+  address: 0x02
+  time_id: sntp_time
+  sensors:
+    - test_battery_voltage
+    - test_solar_voltage
+  binary_sensors:
+    - test_load_state

@@ -27,7 +27,9 @@ This is another Heltec WiFi LoRa 32 v3.2 board with no physical connections besi
 
 # Workflow
 
-- After every set of changes I have you make, compile the configuration to confirm that it's valid.
+- After every set of changes I have you make:
+  - Run `clang-format` on all .cpp and .h files in the @components directory
+  - compile the configuration to confirm that it's valid.
 - If ESPHome throws an error about a missing secret during compilation, run `scripts/populate-secrets` and retry.
 - In case of a linker error, do the following before attempting to fix the error by changing the config files:
   - Clean up the build environment
@@ -39,6 +41,7 @@ See below for command examples.
 # Commands
 
 - `scripts/populate-secrets`: loads secrets from a 1Password secure note and writes them to the local @secrets.yaml file. If secrets.yaml exists, it is overwritten.
+- `clang-format -i components/**/*.{h,cpp}`: format c++ source files in local external components folder
 - `esphome compile config-file-name.yaml [another-config-file.yaml]`: Verifies, generates code, and compiles a binary for the specified device configuration file
 - `esphome upload config-file-name.yaml [another-config-file.yaml]`: Uploads the most recently compiled binary to the specified device, identified by config file
 - `esphome clean config-file-name.yaml [another-config-file.yaml]`: Wipes build environment and any artifacts from prior builds.
