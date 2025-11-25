@@ -95,13 +95,19 @@ display:
         it.fill(COLOR_OFF);
       } else {
         it.print(0, 0, id(material_symbols_14), "\U0000F250");
-        it.printf(16, 0, id(roboto_10), "%6.2fV", id(battery_voltage).state);
+        it.printf(16, 0, id(roboto_10), "%6.2fV", id(load_voltage).state);
         it.print(it.get_width() - 16, 0, id(material_symbols_14), id(load_switch).state ? "\U0000E0F0" : "\U0000E9B8");
         it.print(0, 15, id(material_symbols_14), "\U0000F24C");
         it.printf(16, 15, id(roboto_10), "%6.2fA", id(charge_current).state);
         it.print(0, 30, id(material_symbols_14), "\U0000EC0F");
         it.printf(16, 30, id(roboto_10), "%6.2fV", id(solar_voltage).state);
-        it.printf(0, 45, id(roboto_10), "RP: %d, Chg PWM: %d", id(reverse_protect).state, id(charge_manual_override) ? 0 : id(pwm_duty));
+        it.printf(
+          0,
+          45,
+          id(roboto_10),
+          "PWM: %.1f%% (%.2fV)",
+          id(charge_switch_state).state ? 0 : id(charger_duty_cycle).state, id(charge_voltage).state
+        );
       }
 
 packet_transport:
@@ -114,7 +120,7 @@ packet_transport:
       - name: lora-gateway
         encryption: !secret packet_transport_key
     sensors:
-      - battery_voltage
+      - charge_voltage
       - charge_current
       - solar_voltage
       - load_current
@@ -123,7 +129,6 @@ packet_transport:
       - charge_phase_int
       - uptime_seconds
     binary_sensors:
-      - reverse_protect_state
       - load_switch_state
       - charge_switch_state
 
@@ -190,7 +195,7 @@ sensor:
       name: "Charge Voltage"
       unit_of_measurement: "V"
       accuracy_decimals: 2
-      id: battery_voltage
+      id: charge_voltage
       filters:
         - throttle: 30s
     shunt_voltage:
@@ -222,7 +227,7 @@ sensor:
       filters:
         - throttle: 30s
     bus_voltage:
-      name: "Load Voltage"
+      name: "Battery Voltage"
       unit_of_measurement: "V"
       accuracy_decimals: 2
       id: load_voltage
@@ -253,27 +258,6 @@ sensor:
       - throttle: 30s
       - multiply: 11.0  # Voltage divider ratio (220k + 22k) / 22k
     id: solar_voltage
-    on_value_range:
-      - above: !lambda 'return id(battery_voltage).state + 0.5;'
-        then:
-          - if:
-              condition:
-                - switch.is_off: reverse_protect
-              then:
-                - logger.log:
-                    format: "Opening reverse protection gate (VSolar: %.2f, VBat: %.2f)"
-                    args: ['id(solar_voltage).state', 'id(battery_voltage).state']
-                - switch.turn_on: reverse_protect
-      - below: !lambda 'return id(battery_voltage).state + 0.49;'
-        then:
-          - if:
-              condition:
-                - switch.is_on: reverse_protect
-              then:
-                - logger.log:
-                    format: "Closing reverse protection gste (VSolar: %.2f, VBat: %.2f)"
-                    args: ['id(solar_voltage).state', 'id(battery_voltage).state']
-                - switch.turn_off: reverse_protect
 
   # - platform: dallas_temp
   #   name: "Ambient Temperature"
@@ -297,43 +281,31 @@ output:
     pin: GPIO4
     id: charge_pwm
     frequency: 1000Hz
+    # restore_mode: RESTORE_DEFAULT_OFF
 
   - platform: gpio
     pin: GPIO48
-    id: reverse_protect_output
-    inverted: false
-
-  - platform: gpio
-    pin: GPIO45
     id: load_switch_output
     inverted: false
 
 # Switches for manual/remote control (forwarded/received via packet_transport)
 switch:
-  - platform: output
+  - platform: template
     name: "Charge Enable"
-    output: charge_pwm
     id: charge_switch
-    restore_mode: ALWAYS_OFF
-    on_turn_off:
-      - output.set_level:
-          id: charge_pwm
-          level: 0%
-      - globals.set:
-          id: charge_manual_override
-          value: 'true'
-      - logger.log: "Charge enable switch manually turned OFF - setting override flag"
-    on_turn_on:
-      - globals.set:
-          id: charge_manual_override
-          value: 'false'
-      - logger.log: "Charge enable switch manually turned ON - clearing override flag"
-
-  - platform: output
-    name: "Reverse Protection"
-    output: reverse_protect_output
-    id: reverse_protect
-    restore_mode: ALWAYS_OFF
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      then:
+        - logger.log: "Charging enabled"
+        - binary_sensor.template.publish:
+            id: charge_switch_state
+            state: ON
+    turn_off_action:
+      then:
+        - logger.log: "Charging manually disabled"
+        - binary_sensor.template.publish:
+            id: charge_switch_state
+            state: OFF
 
   - platform: output
     name: "Load Enable"
@@ -357,12 +329,6 @@ binary_sensor:
     name: "ESP Status"
 
   - platform: template
-    name: "Reverse Protection State"
-    id: reverse_protect_state
-    lambda: |-
-      return id(reverse_protect).state;
-
-  - platform: template
     name: "Load Enable State"
     id: load_switch_state
     lambda: |-
@@ -371,8 +337,6 @@ binary_sensor:
   - platform: template
     name: "Charge Enable State"
     id: charge_switch_state
-    lambda: |-
-      return id(charge_switch).state;
 
   - platform: template
     id: remote_reboot
@@ -389,15 +353,6 @@ binary_sensor:
       - switch.turn_on: charge_switch
     on_release:
       - switch.turn_off: charge_switch
-
-  - platform: packet_transport
-    provider: lora-gateway
-    id: reverse_protect_control
-    internal: true
-    on_press:
-      - switch.turn_on: reverse_protect
-    on_release:
-      - switch.turn_off: reverse_protect
 
   - platform: packet_transport
     provider: lora-gateway
@@ -440,7 +395,7 @@ interval:
     then:
       - script.execute:
           id: duty_cycle_management
-          battery_voltage: !lambda 'return id(battery_voltage).state;'
+          battery_voltage: !lambda 'return id(load_voltage).state;'
           charge_current: !lambda 'return id(charge_current).state;'
           solar_voltage: !lambda 'return id(solar_voltage).state;'
           charge_power: !lambda 'return id(charge_power).state;'
@@ -455,11 +410,6 @@ globals:
     type: int
     initial_value: '128'
     restore_value: no
-
-  - id: charge_manual_override
-    type: bool
-    initial_value: 'true'
-    restore_value: yes
 
   - id: display_on
     type: bool
@@ -490,16 +440,14 @@ script:
           std::string new_phase = "OFF";
           ChargePhase new_phase_int = Off;
 
-          // Check if charging is manually disabled
-          if (id(charge_manual_override)) {
-            new_phase = "OFF";
-            new_phase_int = Off;
-          }
-          // Check if reverse protection is off (no solar available)
-          else if (!id(reverse_protect).state) {
+          ESP_LOGD("charger", "beginning duty cycle management script");
+
+          // If solar voltage is less than battery voltage, we're discharging
+          if (solar_voltage < battery_voltage || (!id(charge_switch_state).state)) {
             new_phase = "DISCHARGING";
             new_phase_int = Discharging;
           }
+
           // Solar available and charging enabled - determine phase by voltage
           else {
             if (battery_voltage < 14.2) {
@@ -513,6 +461,8 @@ script:
               new_phase_int = Float;
             }
           }
+
+          ESP_LOGD("charger", "new phase is %s", new_phase.c_str());
 
           // Update phase if changed
           if (id(charge_phase) != new_phase) {
@@ -528,8 +478,10 @@ script:
             // No charging - set PWM to zero
             if (id(pwm_duty) != 0) {
               id(pwm_duty) = 0;
-              id(charge_pwm).set_level(0);
+              id(charge_pwm).set_level(id(pwm_duty));
               ESP_LOGD("charger", "Charging disabled: %s", new_phase.c_str());
+              id(charge_pwm).turn_off();
+              return;
             }
           }
           else if (new_phase == "BULK") {

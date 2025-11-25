@@ -19,12 +19,15 @@ This document describes the complete wiring and connections for the LiFePO4 sola
 - **R2:** 22kΩ, 5% tolerance (voltage divider - low side)
 - **R3:** 100Ω, 5% tolerance (M1 gate current limiting)
 - **R4:** 10kΩ, 5% tolerance (M1 gate pulldown)
-- **R5:** 100Ω, 5% tolerance (M3 gate current limiting)
+- **R5:** 100Ω, 5% tolerance (M2 gate current limiting)
+- **R6:** 10kΩ, 5% tolerance (M2 gate pulldown)
 
 ### MOSFETs
 - **M1:** IRLZ44N N-channel MOSFET (charge control PWM)
-- **M2:** IRLZ44N N-channel MOSFET (reverse current protection)
-- **M3:** IRLZ44N N-channel MOSFET (load switch)
+- **M2:** IRLZ44N N-channel MOSFET (load switch)
+
+### Diodes
+- **D1:** 1N5822 Schottky diode (reverse current protection)
 
 ### Sensors & ICs
 - **IC1:** INA219 breakout board @ I2C address 0x40 (solar/charge current sensor)
@@ -54,6 +57,14 @@ POS → IC1 VIN+
 NEG → M1 Drain
 ```
 
+### D1 (1N5822 Schottky Diode - Reverse Protection)
+**Purpose:** Prevent reverse current from battery to solar panel at night
+
+```
+Anode → IC1 VIN-
+Cathode → Battery POS
+```
+
 ### Solar Voltage Divider (for ADC reading)
 ```
 R1: Solar POS ↔ GPIO3
@@ -65,7 +76,7 @@ Max input: 22V → 2.0V at GPIO3
 
 ### Battery (BAT)
 ```
-POS → IC1 VIN-
+POS → D1 Cathode
 POS → IC2 VIN+
 POS → LM2596 VIN+
 NEG → Common GND
@@ -79,7 +90,7 @@ NEG → LM2596 VIN-
 Gate → R3 → GPIO4
 Gate → R4 → Common GND (pulldown)
 Drain → Solar NEG
-Source → M2 Drain
+Source → IC1 VIN+
 ```
 
 **Gate resistor connections:**
@@ -88,40 +99,28 @@ R3: GPIO4 ↔ M1 Gate (current limiting)
 R4: M1 Gate ↔ Common GND (pulldown)
 ```
 
-### M2 (Reverse Protection MOSFET)
-**Purpose:** Prevent reverse current from battery to solar panel at night
-
-```
-Gate → GPIO48 (enable/disable control)
-Drain → M1 Source
-Source → IC1 VIN+
-```
-
-**Note:** Will be replaced with Schottky diode in future revision.
-
-### M3 (Load Switch MOSFET)
+### M2 (Load Switch MOSFET)
 **Purpose:** Enable/disable power to load (LED flood light)
 
 ```
-Gate → R5 → GPIO45
+Gate → R5 → GPIO48
+Gate → R6 → Common GND (pulldown)
 Drain → Load NEG
-Drain → Common GND
 Source → IC2 VIN-
 ```
 
-**Gate resistor connection:**
+**Gate resistor connections:**
 ```
-R5: GPIO45 ↔ M3 Gate (current limiting)
+R5: GPIO48 ↔ M2 Gate (current limiting)
+R6: M2 Gate ↔ Common GND (pulldown)
 ```
-
-**Note:** Missing pulldown resistor (should add 10kΩ from gate to GND for production).
 
 ### IC1 (INA219 @ 0x40 - Solar/Charge Current Sensor)
 **Purpose:** Measures current flowing from solar panel to battery
 
 ```
-VIN+ → M2 Source
-VIN- → Battery POS
+VIN+ → Solar POS
+VIN- → D1 Anode
 SDA → GPIO1 (I2C data)
 SCL → GPIO2 (I2C clock)
 VCC → MCU 3.3V
@@ -149,7 +148,7 @@ GND → Common GND
 ### Load (LED Flood Light)
 ```
 POS → IC2 VIN-
-NEG → M3 Drain
+NEG → M2 Drain
 NEG → Common GND
 ```
 
@@ -195,8 +194,7 @@ GPIO3 → Solar voltage divider midpoint (ADC input)
 #### Digital Outputs (MOSFET Control)
 ```
 GPIO4 → R3 → M1 Gate (PWM charge control)
-GPIO45 → R5 → M3 Gate (load switch)
-GPIO48 → M2 Gate (reverse protection enable)
+GPIO48 → R5 → M2 Gate (load switch)
 ```
 
 #### 1-Wire Bus
@@ -219,8 +217,9 @@ All of the following connect to a common ground rail on the breadboard:
 
 - Solar NEG (via M1 when ON)
 - Battery NEG
-- Load NEG (via M3 when ON)
+- Load NEG (via M2 when ON)
 - M1 gate pulldown (R4)
+- M2 gate pulldown (R6)
 - IC1 GND
 - IC2 GND
 - DS18B20 GND
@@ -233,37 +232,37 @@ All of the following connect to a common ground rail on the breadboard:
 
 ## Current Flow Paths
 
-### Charging Path (M1 and M2 both ON)
+### Charging Path (M1 ON)
 ```
 Solar+ → IC1 VIN+
        → [IC1 shunt measures current]
        → IC1 VIN-
+       → D1 Anode
+       → D1 Cathode (Schottky diode forward conducts)
        → Battery+ (charges battery)
 
 Solar- → M1 Drain
        → M1 Source (conducts when GPIO4 HIGH/PWM)
-       → M2 Drain
-       → M2 Source (conducts when GPIO48 HIGH)
        → IC1 VIN+
        → Completes circuit
 ```
 
 **Control:** GPIO4 PWM duty cycle controls charging current
-**Enable:** GPIO48 must be HIGH for any charging
+**Protection:** D1 prevents reverse current when solar voltage < battery voltage
 
-### Load Path (M3 ON)
+### Load Path (M2 ON)
 ```
 Battery+ → IC2 VIN+
          → [IC2 shunt measures current]
          → IC2 VIN-
          → Load POS
          → Load NEG
-         → M3 Drain
-         → M3 Source (conducts when GPIO45 HIGH)
+         → M2 Drain
+         → M2 Source (conducts when GPIO48 HIGH)
          → GND
 ```
 
-**Control:** GPIO45 HIGH = load ON, LOW = load OFF
+**Control:** GPIO48 HIGH = load ON, LOW = load OFF
 
 ### Power for MCU
 ```
@@ -286,9 +285,8 @@ Battery+ → LM2596 VIN+
 | GPIO2 | I2C SCL | Output | I2C clock for both INA219 sensors |
 | GPIO3 | ADC | Input | Solar panel voltage (via divider) |
 | GPIO4 | PWM | Output | M1 gate control (charge PWM) |
-| GPIO45 | Digital Out | Output | M3 gate control (load switch) |
+| GPIO48 | Digital Out | Output | M2 gate control (load switch) |
 | GPIO47 | 1-Wire | Bidirectional | DS18B20 temperature sensor |
-| GPIO48 | Digital Out | Output | M2 gate control (reverse protection) |
 
 ---
 
@@ -305,21 +303,23 @@ Both INA219 sensors are configured for high-side current sensing, which measures
 - Detection of shorts to ground
 - No common-mode voltage issues
 
-### Future Improvements
-1. **Replace M2 with Schottky diode** (e.g., 1N5822 or SS54)
-   - Simpler reverse polarity protection
-   - One less GPIO needed
+### Recent Improvements
+1. **✓ Replaced M2 with Schottky diode (D1: 1N5822)**
+   - Simpler reverse current protection
+   - Freed up GPIO45
    - Trade-off: ~0.4V constant voltage drop vs. MOSFET's ~0.01V
+   - No longer need to actively control reverse protection
 
-2. **Add pulldown resistor for M3 gate**
-   - 10kΩ from M3 gate to GND
-   - Prevents floating gate when GPIO45 is uninitialized
+2. **✓ Added pulldown resistor for M2 gate (R6: 10kΩ)**
+   - Prevents floating gate when GPIO48 is uninitialized
+   - Ensures MOSFET stays OFF during boot
 
-3. **Add reverse polarity protection diode**
+### Future Improvements
+1. **Add reverse polarity protection diode**
    - Schottky diode between battery and circuit
    - Prevents damage if battery connected backward
 
-4. **Add fuse**
+2. **Add fuse**
    - 3-5A fuse in series with battery positive
    - Protects against shorts and overcurrent
 
@@ -354,21 +354,22 @@ Both INA219 sensors are configured for high-side current sensing, which measures
 ## Troubleshooting
 
 ### Issue: Solar voltage reads ~12V at night (should be 0V)
-**Cause:** Battery voltage backfeeding through M1/M2 body diodes or MOSFETs conducting when they shouldn't be.
-**Solution:** Ensure GPIO4 and GPIO48 are LOW when charging is disabled.
+**Cause:** Battery voltage backfeeding through M1 body diode or MOSFET conducting when it shouldn't be.
+**Solution:** Ensure GPIO4 is LOW when charging is disabled. D1 should prevent most backfeed, but body diode in M1 can still cause issues.
 
 ### Issue: Charge current reads 0A with sun
 **Possible causes:**
-1. M1 or M2 not turning ON (check GPIO4 and GPIO48 are HIGH)
+1. M1 not turning ON (check GPIO4 is HIGH/PWM active)
 2. PWM duty cycle set to 0%
-3. INA219 damaged or wired incorrectly
-4. Shunt resistor damaged or bypassed
+3. D1 installed backward (anode should be on IC1 VIN- side)
+4. INA219 damaged or wired incorrectly
+5. Shunt resistor damaged or bypassed
 
 ### Issue: Board stays powered with battery disconnected
 **Possible causes:**
 1. USB cable connected (powers via USB)
 2. Parasitic power through IC1/IC2 protection diodes
-3. M1/M2 conducting when they should be OFF
+3. M1 conducting when it should be OFF
 4. Ground loop or shared power rail issue
 
 ### Issue: ADC reading incorrect voltage
