@@ -351,33 +351,12 @@ Both INA219 sensors are configured for high-side current sensing, which measures
 
 ---
 
-## Troubleshooting
-
-### Issue: Solar voltage reads ~12V at night (should be 0V)
-**Cause:** Battery voltage backfeeding through M1 body diode or MOSFET conducting when it shouldn't be.
-**Solution:** Ensure GPIO4 is LOW when charging is disabled. D1 should prevent most backfeed, but body diode in M1 can still cause issues.
-
-### Issue: Charge current reads 0A with sun
-**Possible causes:**
-1. M1 not turning ON (check GPIO4 is HIGH/PWM active)
-2. PWM duty cycle set to 0%
-3. D1 installed backward (anode should be on IC1 VIN- side)
-4. INA219 damaged or wired incorrectly
-5. Shunt resistor damaged or bypassed
-
 ### Issue: Board stays powered with battery disconnected
 **Possible causes:**
 1. USB cable connected (powers via USB)
 2. Parasitic power through IC1/IC2 protection diodes
 3. M1 conducting when it should be OFF
 4. Ground loop or shared power rail issue
-
-### Issue: ADC reading incorrect voltage
-**Possible causes:**
-1. 5V to GND short (check for solder bridges!)
-2. Wrong voltage divider ratio in code
-3. Incorrect ADC attenuation setting
-4. ESP32 ADC needs calibration
 
 ## Author
 
