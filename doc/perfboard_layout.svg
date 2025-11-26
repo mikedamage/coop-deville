@@ -1,0 +1,166 @@
+<svg viewBox="0 0 800 600" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .label { font-family: monospace; font-size: 11px; }
+    .title { font-family: sans-serif; font-size: 14px; font-weight: bold; }
+    .zone-label { font-family: sans-serif; font-size: 10px; fill: #666; }
+    .trace-power { stroke: #cc0000; stroke-width: 3; fill: none; }
+    .trace-gnd { stroke: #000; stroke-width: 4; fill: none; }
+    .trace-signal { stroke: #0066cc; stroke-width: 2; fill: none; stroke-dasharray: 4,2; }
+    .trace-i2c { stroke: #009900; stroke-width: 2; fill: none; }
+  </style>
+
+  <!-- Board outline -->
+  <rect x="50" y="50" width="700" height="500" fill="#c4a574" stroke="#8b7355" stroke-width="3" rx="5"/>
+
+  <!-- Perfboard holes pattern (simplified) -->
+  <defs>
+    <pattern id="holes" width="10" height="10" patternUnits="userSpaceOnUse">
+      <circle cx="5" cy="5" r="1.5" fill="#8b7355"/>
+    </pattern>
+  </defs>
+  <rect x="60" y="60" width="680" height="480" fill="url(#holes)"/>
+
+  <!-- Zone labels -->
+  <text x="120" y="85" class="zone-label">SOLAR INPUT ZONE</text>
+  <text x="550" y="85" class="zone-label">LOAD OUTPUT ZONE</text>
+  <text x="120" y="520" class="zone-label">POWER REGULATION</text>
+  <text x="380" y="520" class="zone-label">MCU ZONE</text>
+
+  <!-- Ground bus (heavy black line along bottom) -->
+  <path d="M 70 480 L 730 480" class="trace-gnd"/>
+  <text x="740" y="485" class="label">GND BUS</text>
+
+  <!-- 12V power rail -->
+  <path d="M 70 120 L 200 120 L 200 400" class="trace-power"/>
+  <text x="75" y="115" class="label" fill="#cc0000">+12V</text>
+
+  <!-- Solar input terminal -->
+  <rect x="70" y="140" width="50" height="40" fill="#4a4a4a" stroke="#000" stroke-width="2"/>
+  <text x="75" y="165" class="label" fill="white">SOL+</text>
+  <rect x="70" y="190" width="50" height="40" fill="#4a4a4a" stroke="#000" stroke-width="2"/>
+  <text x="75" y="215" class="label" fill="white">SOL-</text>
+
+  <!-- M1 - Charge MOSFET -->
+  <rect x="140" y="240" width="60" height="80" fill="#333" stroke="#000" stroke-width="2"/>
+  <text x="150" y="270" class="label" fill="white">M1</text>
+  <text x="145" y="290" class="label" fill="#aaa">IRLZ44N</text>
+  <text x="145" y="305" class="label" fill="#aaa">Charge</text>
+  <!-- M1 pins -->
+  <text x="125" y="255" class="label">G</text>
+  <text x="125" y="280" class="label">D</text>
+  <text x="125" y="305" class="label">S</text>
+
+  <!-- R3, R4 near M1 gate -->
+  <rect x="90" y="250" width="30" height="8" fill="#d4a574" stroke="#000"/>
+  <text x="92" y="248" class="label">R3</text>
+  <rect x="90" y="265" width="30" height="8" fill="#d4a574" stroke="#000"/>
+  <text x="92" y="263" class="label">R4</text>
+
+  <!-- IC1 - INA219 Solar -->
+  <rect x="230" y="160" width="70" height="50" fill="#0055aa" stroke="#000" stroke-width="2"/>
+  <text x="240" y="185" class="label" fill="white">IC1</text>
+  <text x="235" y="200" class="label" fill="#aaa">INA219</text>
+  <text x="305" y="180" class="label">0x40</text>
+
+  <!-- D1 - Schottky -->
+  <polygon points="320,220 350,240 320,260 320,220" fill="#333" stroke="#000" stroke-width="2"/>
+  <line x1="350" y1="240" x2="370" y2="240" stroke="#000" stroke-width="2"/>
+  <line x1="350" y1="220" x2="350" y2="260" stroke="#000" stroke-width="2"/>
+  <text x="325" y="280" class="label">D1 1N5822</text>
+
+  <!-- Voltage divider -->
+  <rect x="150" y="140" width="8" height="25" fill="#d4a574" stroke="#000"/>
+  <text x="162" y="155" class="label">R1 220k</text>
+  <rect x="150" y="170" width="8" height="25" fill="#d4a574" stroke="#000"/>
+  <text x="162" y="185" class="label">R2 22k</text>
+
+  <!-- Battery terminal -->
+  <rect x="70" y="380" width="50" height="40" fill="#aa0000" stroke="#000" stroke-width="2"/>
+  <text x="75" y="405" class="label" fill="white">BAT+</text>
+  <rect x="70" y="430" width="50" height="40" fill="#000" stroke="#000" stroke-width="2"/>
+  <text x="75" y="455" class="label" fill="white">BAT-</text>
+
+  <!-- LM2596 Buck Converter -->
+  <rect x="150" y="400" width="90" height="60" fill="#006600" stroke="#000" stroke-width="2"/>
+  <text x="160" y="425" class="label" fill="white">LM2596</text>
+  <text x="160" y="445" class="label" fill="#aaa">12V→5V</text>
+
+  <!-- MCU - Heltec -->
+  <rect x="380" y="360" width="160" height="100" fill="#1a1a2e" stroke="#000" stroke-width="2"/>
+  <rect x="420" y="375" width="80" height="40" fill="#222" stroke="#444"/>
+  <text x="435" y="400" class="label" fill="#0ff">OLED</text>
+  <text x="400" y="445" class="label" fill="white">Heltec WiFi LoRa 32</text>
+  <!-- MCU pins labeled -->
+  <text x="365" y="375" class="label">5V</text>
+  <text x="355" y="390" class="label">GND</text>
+  <text x="355" y="405" class="label">3V3</text>
+  <text x="545" y="375" class="label">GPIO1</text>
+  <text x="545" y="390" class="label">GPIO2</text>
+  <text x="545" y="405" class="label">GPIO3</text>
+  <text x="545" y="420" class="label">GPIO4</text>
+  <text x="545" y="435" class="label">GPIO47</text>
+  <text x="545" y="450" class="label">GPIO48</text>
+
+  <!-- IC2 - INA219 Load -->
+  <rect x="550" y="160" width="70" height="50" fill="#0055aa" stroke="#000" stroke-width="2"/>
+  <text x="560" y="185" class="label" fill="white">IC2</text>
+  <text x="555" y="200" class="label" fill="#aaa">INA219</text>
+  <text x="625" y="180" class="label">0x41</text>
+
+  <!-- M2 - Load MOSFET -->
+  <rect x="640" y="240" width="60" height="80" fill="#333" stroke="#000" stroke-width="2"/>
+  <text x="650" y="270" class="label" fill="white">M2</text>
+  <text x="645" y="290" class="label" fill="#aaa">IRLZ44N</text>
+  <text x="650" y="305" class="label" fill="#aaa">Load</text>
+  <!-- M2 pins -->
+  <text x="705" y="255" class="label">G</text>
+  <text x="705" y="280" class="label">D</text>
+  <text x="705" y="305" class="label">S</text>
+
+  <!-- R5, R6 near M2 gate -->
+  <rect x="710" y="250" width="30" height="8" fill="#d4a574" stroke="#000"/>
+  <text x="712" y="248" class="label">R5</text>
+  <rect x="710" y="265" width="30" height="8" fill="#d4a574" stroke="#000"/>
+  <text x="712" y="263" class="label">R6</text>
+
+  <!-- Load terminal -->
+  <rect x="680" y="140" width="50" height="40" fill="#ff6600" stroke="#000" stroke-width="2"/>
+  <text x="682" y="165" class="label" fill="white">LOAD+</text>
+  <rect x="680" y="190" width="50" height="40" fill="#000" stroke="#000" stroke-width="2"/>
+  <text x="682" y="215" class="label" fill="white">LOAD-</text>
+
+  <!-- DS18B20 -->
+  <rect x="300" y="380" width="50" height="40" fill="#333" stroke="#000" stroke-width="2"/>
+  <text x="303" y="400" class="label" fill="white">DS18B20</text>
+  <text x="308" y="415" class="label" fill="#aaa">Temp</text>
+
+  <!-- I2C bus trace (daisy chain) -->
+  <path d="M 540 390 L 585 390 L 585 215 L 300 215 L 300 215" class="trace-i2c"/>
+  <path d="M 300 215 L 300 180" class="trace-i2c"/>
+  <text x="420" y="230" class="label" fill="#009900">I2C SDA/SCL</text>
+
+  <!-- Signal traces to MOSFETs -->
+  <path d="M 540 420 L 560 420 L 560 340 L 120 340 L 120 260" class="trace-signal"/>
+  <text x="330" y="355" class="label" fill="#0066cc">GPIO4→M1</text>
+
+  <path d="M 540 450 L 620 450 L 620 340 L 700 340 L 700 260" class="trace-signal"/>
+  <text x="620" y="365" class="label" fill="#0066cc">GPIO48→M2</text>
+
+  <!-- ADC trace -->
+  <path d="M 158 195 L 158 350 L 380 350 L 380 405" class="trace-signal"/>
+  <text x="260" y="345" class="label" fill="#0066cc">GPIO3 ADC</text>
+
+  <!-- Legend -->
+  <rect x="560" y="480" width="170" height="90" fill="white" stroke="#000" rx="5"/>
+  <text x="570" y="498" class="title">Legend</text>
+  <line x1="570" y1="510" x2="600" y2="510" class="trace-gnd"/>
+  <text x="610" y="514" class="label">Ground Bus</text>
+  <line x1="570" y1="530" x2="600" y2="530" class="trace-power"/>
+  <text x="610" y="534" class="label">12V Power</text>
+  <line x1="570" y1="550" x2="600" y2="550" class="trace-i2c"/>
+  <text x="610" y="554" class="label">I2C Bus</text>
+
+  <!-- Title -->
+  <text x="300" y="35" class="title" font-size="18">Solar Charger Perfboard Layout</text>
+</svg>
+
