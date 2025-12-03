@@ -96,7 +96,7 @@ display:
       } else {
         it.print(0, 0, id(material_symbols_14), "\U0000F250");
         it.printf(16, 0, id(roboto_10), "%6.2fV", id(load_voltage).state);
-        it.print(it.get_width() - 16, 0, id(material_symbols_14), id(load_switch).state ? "\U0000E0F0" : "\U0000E9B8");
+        it.print(it.get_width() - 16, 0, id(material_symbols_14), id(load_switch).remote_values.is_on() ? "\U0000E0F0" : "\U0000E9B8");
         it.print(0, 15, id(material_symbols_14), "\U0000F24C");
         it.printf(16, 15, id(roboto_10), "%6.2fA", id(charge_current).state);
         it.print(0, 30, id(material_symbols_14), "\U0000EC0F");
@@ -171,8 +171,8 @@ sensor:
     accuracy_decimals: 2
     lambda: |-
       return id(pwm_duty) / 255.0 * 100.0;
-    filters:
-      - throttle: 30s
+    # filters:
+    #   - throttle: 30s
 
   - platform: template
     name: "Charge Phase"
@@ -189,28 +189,28 @@ sensor:
       name: "Charge Current"
       unit_of_measurement: "A"
       accuracy_decimals: 2
-      filters:
-        - throttle: 30s
+      # filters:
+      #   - throttle: 30s
     bus_voltage:
       name: "Charge Voltage"
       unit_of_measurement: "V"
       accuracy_decimals: 2
       id: charge_voltage
-      filters:
-        - throttle: 30s
+      # filters:
+      #   - throttle: 30s
     shunt_voltage:
       name: "Charge Shunt Voltage"
       id: shunt_voltage
       unit_of_measurement: "V"
-      filters:
-        - throttle: 30s
+      # filters:
+      #   - throttle: 30s
     power:
       name: "Charge Power"
       unit_of_measurement: "W"
       accuracy_decimals: 2
       id: charge_power
-      filters:
-        - throttle: 30s
+      # filters:
+      #   - throttle: 30s
     update_interval: 5s
 
   - platform: ina219
@@ -224,28 +224,28 @@ sensor:
       name: "Load Current"
       unit_of_measurement: "A"
       accuracy_decimals: 2
-      filters:
-        - throttle: 30s
+      # filters:
+      #   - throttle: 30s
     bus_voltage:
       name: "Battery Voltage"
       unit_of_measurement: "V"
       accuracy_decimals: 2
       id: load_voltage
-      filters:
-        - throttle: 30s
+      # filters:
+      #   - throttle: 30s
     shunt_voltage:
       name: "Load Shunt Voltage"
       id: load_shunt_voltage
       unit_of_measurement: "V"
-      filters:
-        - throttle: 30s
+      # filters:
+      #   - throttle: 30s
     power:
       name: "Load Power"
       unit_of_measurement: "W"
       accuracy_decimals: 2
       id: load_power
-      filters:
-        - throttle: 30s
+      # filters:
+      #   - throttle: 30s
     update_interval: 5s
 
   - platform: adc
@@ -255,8 +255,11 @@ sensor:
     update_interval: 5s
     attenuation: 12db
     filters:
-      - throttle: 30s
       - multiply: 11.0  # Voltage divider ratio (220k + 22k) / 22k
+      - offset: -0.56 # subtract ADC gain setting noise from result
+      - clamp: # there is a diode preventing reverse polarity, so minimum voltage of above cannot go below 0V
+          min_value: 0
+      #   - throttle: 30s
     id: solar_voltage
 
   # - platform: dallas_temp
@@ -280,48 +283,58 @@ output:
   - platform: ledc
     pin: GPIO4
     id: charge_pwm
-    frequency: 1000Hz
-    # restore_mode: RESTORE_DEFAULT_OFF
 
-  - platform: gpio
+  - platform: ledc
     pin: GPIO48
     id: load_switch_output
-    inverted: false
+
+light:
+  - platform: monochromatic
+    output: charge_pwm
+    id: charge_switch
+    name: "Duty Cycle Control"
+    default_transition_length: 0s
+
+  - platform: monochromatic
+    output: load_switch_output
+    id: load_switch
+    name: "LED Lamp"
+    default_transition_length: 0s
 
 # Switches for manual/remote control (forwarded/received via packet_transport)
 switch:
-  - platform: template
-    name: "Charge Enable"
-    id: charge_switch
-    restore_mode: RESTORE_DEFAULT_OFF
-    turn_on_action:
-      then:
-        - logger.log: "Charging enabled"
-        - binary_sensor.template.publish:
-            id: charge_switch_state
-            state: ON
-    turn_off_action:
-      then:
-        - logger.log: "Charging manually disabled"
-        - binary_sensor.template.publish:
-            id: charge_switch_state
-            state: OFF
-
-  - platform: output
-    name: "Load Enable"
-    output: load_switch_output
-    id: load_switch
-    restore_mode: RESTORE_DEFAULT_ON
-    on_turn_off:
-      - globals.set:
-          id: load_manual_override
-          value: 'true'
-      - logger.log: "Load switch manually turned OFF - setting override flag"
-    on_turn_on:
-      - globals.set:
-          id: load_manual_override
-          value: 'false'
-      - logger.log: "Load switch manually turned ON - clearing override flag"
+  # - platform: template
+  #   name: "Charge Enable"
+  #   id: charge_switch
+  #   restore_mode: RESTORE_DEFAULT_OFF
+  #   turn_on_action:
+  #     then:
+  #       - logger.log: "Charging enabled"
+  #       - binary_sensor.template.publish:
+  #           id: charge_switch_state
+  #           state: ON
+  #   turn_off_action:
+  #     then:
+  #       - logger.log: "Charging manually disabled"
+  #       - binary_sensor.template.publish:
+  #           id: charge_switch_state
+  #           state: OFF
+  #
+  # - platform: output
+  #   name: "Load Enable"
+  #   output: load_switch_output
+  #   id: load_switch
+  #   restore_mode: RESTORE_DEFAULT_ON
+  #   on_turn_off:
+  #     - globals.set:
+  #         id: load_manual_override
+  #         value: 'true'
+  #     - logger.log: "Load switch manually turned OFF - setting override flag"
+  #   on_turn_on:
+  #     - globals.set:
+  #         id: load_manual_override
+  #         value: 'false'
+  #     - logger.log: "Load switch manually turned ON - clearing override flag"
 
 # Binary sensor for status
 binary_sensor:
@@ -332,11 +345,13 @@ binary_sensor:
     name: "Load Enable State"
     id: load_switch_state
     lambda: |-
-      return id(load_switch).state;
+      return id(load_switch).remote_values.is_on();
 
   - platform: template
     name: "Charge Enable State"
     id: charge_switch_state
+    lambda: |-
+      return id(charge_switch).remote_values.is_on();
 
   - platform: template
     id: remote_reboot
@@ -350,24 +365,28 @@ binary_sensor:
     id: charge_control
     internal: true
     on_press:
-      - switch.turn_on: charge_switch
+      - light.turn_on: charge_switch
     on_release:
-      - switch.turn_off: charge_switch
+      - light.turn_off: charge_switch
 
   - platform: packet_transport
     provider: lora-gateway
     id: load_control
     internal: true
     on_press:
-      - switch.turn_on: load_switch
+      - light.turn_on: load_switch
     on_release:
-      - switch.turn_off: load_switch
+      - light.turn_off: load_switch
 
   - platform: gpio
     pin: GPIO0
     id: display_toggle
     filters:
       - delayed_on: 10ms
+    on_double_click:
+      then:
+        - logger.log: "Toggling load switch"
+        - light.toggle: load_switch
     on_press:
       then:
         - logger.log: 'Display toggle button pressed'
@@ -393,12 +412,13 @@ text_sensor:
 interval:
   - interval: 5s
     then:
-      - script.execute:
-          id: duty_cycle_management
-          battery_voltage: !lambda 'return id(load_voltage).state;'
-          charge_current: !lambda 'return id(charge_current).state;'
-          solar_voltage: !lambda 'return id(solar_voltage).state;'
-          charge_power: !lambda 'return id(charge_power).state;'
+      - logger.log: "Would execute duty cycle management script now"
+      # - script.execute:
+      #     id: duty_cycle_management
+      #     battery_voltage: !lambda 'return id(load_voltage).state;'
+      #     charge_current: !lambda 'return id(charge_current).state;'
+      #     solar_voltage: !lambda 'return id(solar_voltage).state;'
+      #     charge_power: !lambda 'return id(charge_power).state;'
 
 globals:
   - id: prev_power
@@ -544,10 +564,10 @@ script:
       - if:
           condition:
             and:
-              - switch.is_on: load_switch
-              - lambda: 'return battery_voltage < 10.8;'
+              - light.is_on: load_switch
+              - lambda: 'return battery_voltage < 11.0;'
           then:
-            - switch.turn_off: load_switch
+            - light.turn_off: load_switch
             - logger.log:
                 format: "Low battery voltage (%.2f < 10.8V). Turning off load switch."
                 args: ['battery_voltage']
@@ -556,11 +576,11 @@ script:
       - if:
           condition:
             and:
-              - switch.is_off: load_switch
+              - light.is_off: load_switch
               - lambda: 'return battery_voltage > 12.0;'
               - lambda: 'return !id(load_manual_override);'
           then:
-            - switch.turn_on: load_switch
+            - light.turn_on: load_switch
             - logger.log:
                 format: "Battery voltage nominal (%.2f >= 12.0V) - turning on load switch"
                 args: ['battery_voltage']
