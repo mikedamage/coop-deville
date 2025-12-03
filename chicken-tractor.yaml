@@ -249,7 +249,7 @@ sensor:
     update_interval: 5s
 
   - platform: adc
-    pin: GPIO3
+    pin: GPIO5
     name: "Solar Voltage"
     unit_of_measurement: "V"
     update_interval: 5s
@@ -281,7 +281,7 @@ sensor:
 # Outputs for MOSFET control (receivable via packet_transport)
 output:
   - platform: ledc
-    pin: GPIO4
+    pin: GPIO38
     id: charge_pwm
 
   - platform: ledc

@@ -23,16 +23,17 @@ This document provides a comprehensive reference for all GPIO pins on the Heltec
 | 18 | GPIO7 | TOUCH7 | ADC1_CH6 | | |
 | 17 | GPIO6 | TOUCH6 | ADC1_CH5 | | |
 | 16 | GPIO5 | TOUCH5 | ADC1_CH4 | | |
-| 15 | GPIO4 | TOUCH4 | ADC1_CH3 | | :white_check_mark: **Charge PWM** (LEDC output) |
-| 14 | GPIO3 | TOUCH3 | ADC1_CH2 | | :white_check_mark: **Solar Voltage ADC** |
+| 16 | GPIO5 | TOUCH5 | ADC1_CH4 | | :white_check_mark: **Solar Voltage ADC** |
+| 15 | GPIO4 | TOUCH4 | ADC1_CH3 | | |
+| 14 | GPIO3 | TOUCH3 | ADC1_CH2 | **STRAP** | |
 | 13 | GPIO2 | TOUCH2 | ADC1_CH1 | | :white_check_mark: **I2C SCL** (sensor_bus) |
 | 12 | GPIO1 | TOUCH1, VBAT_Read | ADC1_CH0 | | :white_check_mark: **I2C SDA** (sensor_bus) |
-| 11 | GPIO38 | SUBSPIWP, FSPIWP | | | |
+| 11 | GPIO38 | SUBSPIWP, FSPIWP | | | :white_check_mark: **Charge PWM** (LEDC output) |
 | 10 | GPIO39 | MTCK | | JTAG | |
 | 9 | GPIO40 | MTDO | | JTAG | |
 | 8 | GPIO41 | MTDI | | JTAG | |
 | 7 | GPIO42 | MTMS | | JTAG | |
-| 6 | GPIO45 | | | **STRAP** | :white_check_mark: **Load Switch Output** |
+| 6 | GPIO45 | | | **STRAP** | |
 | 5 | GPIO46 | | | **STRAP** (input only) | |
 | 4 | GPIO37 | ADC_Ctrl, SUBSPIQ, FSPIQ, SPIDQS | | | |
 | 3 | 3V3 | Power | | | |
@@ -49,7 +50,7 @@ This document provides a comprehensive reference for all GPIO pins on the Heltec
 | 17 | GPIO20 | U1CTS | ADC2_CH9 | USB D+, CLK_OUT1 | |
 | 16 | GPIO21 | OLED_RST | | | :white_check_mark: **OLED Reset** |
 | 15 | GPIO26 | SPICS1 | | | |
-| 14 | GPIO48 | | | | :white_check_mark: **Reverse Protection Output** |
+| 14 | GPIO48 | | | | :white_check_mark: **Load Switch Output** |
 | 13 | GPIO47 | | | | |
 | 12 | GPIO33 | SPIIO4 | | FSPIHD, SUBSPIHD | |
 | 11 | GPIO34 | SPIIO5 | | FSPICS0, SUBSPICS0 | |
@@ -100,10 +101,11 @@ These pins affect boot behavior and should be used with caution:
 | GPIO | Boot Function | Default State | Notes |
 |------|---------------|---------------|-------|
 | GPIO0 | Boot mode select | Pull-up | LOW = download mode, HIGH = normal boot |
+| GPIO3 | JTAG select | Pull-up | Directly connected to JTAG signal, avoid external pulls |
 | GPIO45 | VDD_SPI voltage | Pull-down | Selects flash voltage (3.3V/1.8V) |
 | GPIO46 | Boot mode select | Pull-down | Input only, affects ROM messages |
 
-> **Warning**: GPIO45 is used for the load switch output. Ensure the connected circuitry doesn't pull this pin during boot, or the device may fail to start properly.
+> **Note**: GPIO3 was previously used for solar voltage ADC but moved to GPIO5 to avoid strapping pin issues when the solar panel is disconnected (which would pull the pin low).
 
 ---
 
@@ -115,9 +117,9 @@ These pins affect boot behavior and should be used with caution:
 |---------|------|---------------|
 | ADC1_CH0 | GPIO1 | I2C SDA (not ADC) |
 | ADC1_CH1 | GPIO2 | I2C SCL (not ADC) |
-| ADC1_CH2 | GPIO3 | :white_check_mark: **Solar Voltage** |
-| ADC1_CH3 | GPIO4 | PWM output (not ADC) |
-| ADC1_CH4 | GPIO5 | Available |
+| ADC1_CH2 | GPIO3 | Available (strapping pin - avoid) |
+| ADC1_CH3 | GPIO4 | Available |
+| ADC1_CH4 | GPIO5 | :white_check_mark: **Solar Voltage** |
 | ADC1_CH5 | GPIO6 | Available |
 | ADC1_CH6 | GPIO7 | Available |
 
@@ -136,11 +138,11 @@ These pins affect boot behavior and should be used with caution:
 
 | GPIO | Function | Configuration | File |
 |------|----------|---------------|------|
-| GPIO0 | User button | `binary_sensor` (display toggle) | chicken-tractor.yaml:411 |
-| GPIO1 | I2C SDA | `i2c.sda` (sensor_bus) | chicken-tractor.yaml:132 |
-| GPIO2 | I2C SCL | `i2c.scl` (sensor_bus) | chicken-tractor.yaml:133 |
-| GPIO3 | Solar voltage | `sensor.adc` | chicken-tractor.yaml:247 |
-| GPIO4 | Charge PWM | `output.ledc` | chicken-tractor.yaml:297 |
+| GPIO0 | User button | `binary_sensor` (display toggle) | chicken-tractor.yaml:382 |
+| GPIO1 | I2C SDA | `i2c.sda` (sensor_bus) | chicken-tractor.yaml:137 |
+| GPIO2 | I2C SCL | `i2c.scl` (sensor_bus) | chicken-tractor.yaml:138 |
+| GPIO5 | Solar voltage | `sensor.adc` | chicken-tractor.yaml:251 |
+| GPIO38 | Charge PWM | `output.ledc` | chicken-tractor.yaml:284 |
 | GPIO8 | LoRa CS | `sx126x.cs_pin` | heltec-lora.yaml:10 |
 | GPIO9 | LoRa SCK | `spi.clk_pin` | heltec-lora.yaml:2 |
 | GPIO10 | LoRa MOSI | `spi.mosi_pin` | heltec-lora.yaml:3 |
@@ -152,8 +154,7 @@ These pins affect boot behavior and should be used with caution:
 | GPIO18 | OLED SCL | `i2c.scl` (display_bus) | heltec-display.yaml:15 |
 | GPIO21 | OLED Reset | `display.reset_pin` | heltec-display.yaml:21 |
 | GPIO36 | OLED Vext | `pinMode()` in on_boot | heltec-display.yaml:7 |
-| GPIO45 | Load switch | `output.gpio` | chicken-tractor.yaml:307 |
-| GPIO48 | Reverse protection | `output.gpio` | chicken-tractor.yaml:302 |
+| GPIO48 | Load switch | `output.ledc` | chicken-tractor.yaml:289 |
 
 ### I2C Buses
 
@@ -170,7 +171,8 @@ The following GPIOs are exposed on the headers and not currently used:
 
 | GPIO | Header | Pin | ADC | Notes |
 |------|--------|-----|-----|-------|
-| GPIO5 | J3 | 16 | ADC1_CH4 | Touch capable |
+| GPIO3 | J3 | 14 | ADC1_CH2 | **Strapping pin** - avoid for analog input |
+| GPIO4 | J3 | 15 | ADC1_CH3 | Touch capable |
 | GPIO6 | J3 | 17 | ADC1_CH5 | Touch capable |
 | GPIO7 | J3 | 18 | ADC1_CH6 | Touch capable |
 | GPIO26 | J2 | 15 | | SPI CS1 alternate |
@@ -178,8 +180,8 @@ The following GPIOs are exposed on the headers and not currently used:
 | GPIO34 | J2 | 11 | | SPI alternate |
 | GPIO35 | J2 | 10 | | LED_Write capable |
 | GPIO37 | J3 | 4 | | ADC_Ctrl |
-| GPIO38 | J3 | 11 | | SPI WP alternate |
 | GPIO39-42 | J3 | 7-10 | | JTAG pins |
+| GPIO45 | J3 | 6 | | **Strapping pin** - use with caution |
 | GPIO46 | J3 | 5 | | **Input only**, strapping pin |
 | GPIO47 | J2 | 13 | | |
 
