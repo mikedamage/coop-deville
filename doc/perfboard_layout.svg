@@ -93,7 +93,7 @@
   <text x="118" y="488" class="label-small" fill="#aaa">12V-5V</text>
 
   <!-- Heltec WiFi LoRa 32 V3 (50.2x25.5mm = 402x204px) - LANDSCAPE orientation -->
-  <!-- Headers on the long (50.2mm) sides as per pinout image -->
+  <!-- Headers on the long (50.2mm) sides TOP and BOTTOM -->
   <rect x="280" y="360" width="402" height="204" fill="#1a1a2e" stroke="#000" stroke-width="2"/>
   <!-- OLED display area -->
   <rect x="380" y="405" width="100" height="50" fill="#222" stroke="#444"/>
@@ -105,37 +105,24 @@
   <text x="340" y="540" class="label" fill="white">Heltec WiFi LoRa 32 V3</text>
   <text x="380" y="555" class="label-small" fill="#888">50.2 x 25.5mm</text>
 
-  <!-- Header J3 pins (left side - 18 pins along 50.2mm edge) -->
-  <!-- Pin 1 at bottom (GND), Pin 18 at top (GPIO7) -->
-  <text x="285" y="355" class="label-small" fill="#666">Header J3</text>
-  <text x="290" y="375" class="label-small">G7 (18)</text>
-  <text x="290" y="390" class="label-small">G6 (17)</text>
-  <text x="290" y="405" class="label-small">G5 (16)</text>
-  <text x="290" y="420" class="label-small">G4 (15)</text>
-  <text x="290" y="435" class="label-small">G3 (14)</text>
-  <text x="290" y="450" class="label-small">G2 (13)</text>
-  <text x="290" y="465" class="label-small">G1 (12)</text>
-  <text x="290" y="480" class="label-small">G38(11)</text>
-  <text x="290" y="495" class="label-small">G39(10)</text>
-  <text x="290" y="510" class="label-small">G40 (9)</text>
-  <text x="290" y="525" class="label-small">G41 (8)</text>
-  <text x="290" y="540" class="label-small">G42 (7)</text>
+  <!-- Header J3 pins (TOP edge - 18 pins along 50.2mm) -->
+  <!-- Pin 1 at left (GND), Pin 18 at right (GPIO7) -->
+  <!-- Pins at 2.54mm pitch (20.32px), starting at x=308 -->
+  <text x="400" y="348" class="label-small" fill="#666" text-anchor="middle">Header J3 (Top)</text>
+  <text x="308" y="355" class="label-small" text-anchor="middle">GND(1)</text>
+  <text x="430" y="355" class="label-small" text-anchor="middle">G1(12)</text>
+  <text x="450" y="355" class="label-small" text-anchor="middle">G2(13)</text>
+  <text x="511" y="355" class="label-small" text-anchor="middle">G38(11)</text>
+  <text x="613" y="355" class="label-small" text-anchor="middle">G5(16)</text>
+  <text x="653" y="355" class="label-small" text-anchor="middle">G7(18)</text>
 
-  <!-- Header J2 pins (right side - 18 pins along 50.2mm edge) -->
-  <!-- Pin 1 at bottom (GND), Pin 18 at top (GPIO19) -->
-  <text x="645" y="355" class="label-small" fill="#666">Header J2</text>
-  <text x="650" y="375" class="label-small">G19(18)</text>
-  <text x="650" y="390" class="label-small">G20(17)</text>
-  <text x="650" y="405" class="label-small">G21(16)</text>
-  <text x="650" y="420" class="label-small">G26(15)</text>
-  <text x="650" y="435" class="label-small">G48(14)</text>
-  <text x="650" y="450" class="label-small">G47(13)</text>
-  <text x="650" y="465" class="label-small">G33(12)</text>
-  <text x="650" y="480" class="label-small">G34(11)</text>
-  <text x="650" y="495" class="label-small">G35(10)</text>
-  <text x="650" y="510" class="label-small">G36 (9)</text>
-  <text x="650" y="525" class="label-small">G0  (8)</text>
-  <text x="650" y="540" class="label-small">RST (7)</text>
+  <!-- Header J2 pins (BOTTOM edge - 18 pins along 50.2mm) -->
+  <!-- Pin 1 at left (GND), Pin 18 at right (GPIO19) -->
+  <text x="400" y="582" class="label-small" fill="#666" text-anchor="middle">Header J2 (Bottom)</text>
+  <text x="308" y="575" class="label-small" text-anchor="middle">GND(1)</text>
+  <text x="328" y="575" class="label-small" text-anchor="middle">5V(2)</text>
+  <text x="572" y="575" class="label-small" text-anchor="middle">G48(14)</text>
+  <text x="653" y="575" class="label-small" text-anchor="middle">G19(18)</text>
 
   <!-- IC2 - INA219 Load (25x22mm = 200x176px) -->
   <rect x="520" y="100" width="200" height="176" fill="#0055aa" stroke="#000" stroke-width="2"/>
@@ -170,26 +157,38 @@
   <text x="200" y="418" class="label-small" fill="white">DS18B20</text>
   <text x="207" y="430" class="label-small" fill="#aaa">Temp</text>
 
-  <!-- I2C bus trace (connecting both INA219s to MCU GPIO1/GPIO2) -->
-  <!-- GPIO1 (SDA) and GPIO2 (SCL) are on J3 pins 12 and 13 -->
-  <path d="M 300 280 L 300 340 L 400 340 L 400 360" class="trace-i2c"/>
-  <path d="M 620 280 L 620 340 L 420 340 L 420 360" class="trace-i2c"/>
-  <text x="440" y="335" class="label-small" fill="#009900">I2C G1/G2</text>
+  <!-- I2C bus traces (connecting both INA219s to MCU GPIO1/GPIO2) -->
+  <!-- GPIO1 (SDA) J3 pin 12 at x=531.52, y=360 -->
+  <!-- GPIO2 (SCL) J3 pin 13 at x=551.84, y=360 -->
+  <!-- IC1 SDA/SCL at approximately x=300, y=276 -->
+  <!-- IC2 SDA/SCL at approximately x=620, y=276 -->
+  <path d="M 300 276 L 300 340 L 532 340 L 532 360" class="trace-i2c"/>
+  <path d="M 620 276 L 620 340 L 552 340 L 552 360" class="trace-i2c"/>
+  <text x="540" y="335" class="label-small" fill="#009900">I2C G1/G2</text>
 
-  <!-- Signal trace GPIO38 to M1 gate (J3 pin 11 - short run to left side) -->
-  <path d="M 280 480 L 240 480 L 240 300 L 130 300 L 130 236" class="trace-signal"/>
-  <text x="145" y="295" class="label-small" fill="#0066cc">G38-M1</text>
+  <!-- Signal trace GPIO38 to M1 gate -->
+  <!-- GPIO38 J3 pin 11 at x=511.2, y=360 -->
+  <!-- M1 gate at x=120, y=200 -->
+  <path d="M 511 360 L 511 330 L 120 330 L 120 236" class="trace-signal"/>
+  <text x="300" y="325" class="label-small" fill="#0066cc">G38→M1</text>
 
-  <!-- Signal trace GPIO48 to M2 gate (J2 pin 14 - short run to right side) -->
-  <path d="M 682 435 L 700 435 L 700 350 L 630 350 L 630 326" class="trace-signal"/>
-  <text x="685" y="365" class="label-small" fill="#0066cc">G48-M2</text>
+  <!-- Signal trace GPIO48 to M2 gate -->
+  <!-- GPIO48 J2 pin 14 at x=572.16, y=564 -->
+  <!-- M2 gate at x=620, y=290 -->
+  <path d="M 572 564 L 572 580 L 600 580 L 600 320 L 620 320 L 620 326" class="trace-signal"/>
+  <text x="580" y="590" class="label-small" fill="#0066cc">G48→M2</text>
 
-  <!-- ADC trace from voltage divider to MCU GPIO5 (J3 pin 16) -->
-  <path d="M 113 160 L 113 290 L 260 290 L 260 405 L 280 405" class="trace-signal"/>
-  <text x="140" y="285" class="label-small" fill="#0066cc">G5 ADC</text>
+  <!-- ADC trace from voltage divider to MCU GPIO5 -->
+  <!-- GPIO5 J3 pin 16 at x=612.8, y=360 -->
+  <!-- Voltage divider at x=113, y=160 -->
+  <path d="M 113 160 L 113 290 L 613 290 L 613 360" class="trace-signal"/>
+  <text x="350" y="285" class="label-small" fill="#0066cc">G5 ADC</text>
 
   <!-- Power trace from LM2596 to MCU 5V -->
-  <path d="M 182 465 L 220 465 L 220 560 L 682 560" class="trace-power"/>
+  <!-- LM2596 output at x=182, y=474 -->
+  <!-- J2 pin 2 (5V) at x=328.32, y=564 -->
+  <path d="M 182 474 L 220 474 L 220 580 L 328 580 L 328 564" class="trace-power"/>
+  <text x="250" y="590" class="label-small" fill="#cc0000">5V</text>
 
   <!-- Legend -->
   <rect x="40" y="580" width="180" height="60" fill="white" stroke="#000" rx="3"/>
