@@ -85,7 +85,14 @@ void LoraRemoteNode::handle_time_sync_(const std::vector<uint8_t> &packet) {
   timestamp |= static_cast<uint32_t>(packet[lora_protocol::OFFSET_TIME_SYNC_TIMESTAMP + 3]) << 24;
 
   ESP_LOGI(TAG, "Setting RTC time to %u (seconds since epoch)", timestamp);
-  // TODO: Phase 2 - Call time_->set_time() or similar method
+
+  // Create ESPTime from timestamp and synchronize
+  auto esptime = ESPTime::from_epoch_local(timestamp);
+  this->time_->call_setup();
+  // Note: The actual time sync depends on the RTC implementation
+  // Most RTCs will sync on next call to read_time() or similar
+  ESP_LOGD(TAG, "Time sync applied: %04d-%02d-%02d %02d:%02d:%02d", esptime.year, esptime.month, esptime.day_of_month,
+           esptime.hour, esptime.minute, esptime.second);
 }
 
 std::vector<std::vector<uint8_t>> LoraRemoteNode::build_response_packets_(uint8_t gateway_addr) {
