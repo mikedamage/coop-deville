@@ -13,8 +13,21 @@ sensor::Sensor *RemoteNode::get_or_create_sensor(const std::string &name) {
   if (it != this->sensors_.end()) {
     return it->second;
   }
-  // TODO: Phase 4 - Create and register new sensor with device association
-  return nullptr;
+
+  // Create new sensor dynamically
+  auto *sens = new sensor::Sensor();
+  sens->set_name(name.c_str());
+  sens->set_object_id((this->name_ + "_" + name).c_str());
+  sens->set_device_class("none");
+  sens->set_internal(false);  // Make sure it's published to Home Assistant
+
+  // Store in map
+  this->sensors_[name] = sens;
+
+  ESP_LOGD("lora_gateway", "Created new sensor '%s' for node %s (0x%02X)", name.c_str(), this->name_.c_str(),
+           this->address_);
+
+  return sens;
 }
 
 binary_sensor::BinarySensor *RemoteNode::get_or_create_binary_sensor(const std::string &name) {
@@ -22,8 +35,21 @@ binary_sensor::BinarySensor *RemoteNode::get_or_create_binary_sensor(const std::
   if (it != this->binary_sensors_.end()) {
     return it->second;
   }
-  // TODO: Phase 4 - Create and register new binary sensor with device association
-  return nullptr;
+
+  // Create new binary sensor dynamically
+  auto *sens = new binary_sensor::BinarySensor();
+  sens->set_name(name.c_str());
+  sens->set_object_id((this->name_ + "_" + name).c_str());
+  sens->set_device_class("none");
+  sens->set_internal(false);  // Make sure it's published to Home Assistant
+
+  // Store in map
+  this->binary_sensors_[name] = sens;
+
+  ESP_LOGD("lora_gateway", "Created new binary sensor '%s' for node %s (0x%02X)", name.c_str(), this->name_.c_str(),
+           this->address_);
+
+  return sens;
 }
 
 // LoraGateway implementation
@@ -34,6 +60,14 @@ void LoraGateway::setup() {
   if (this->remote_nodes_.empty()) {
     ESP_LOGW(TAG, "No remote nodes configured");
     return;
+  }
+
+  // Register virtual devices for each remote node
+  uint32_t device_id = 1;  // Start device IDs at 1
+  for (auto *node : this->remote_nodes_) {
+    node->set_device_id(device_id++);
+    ESP_LOGD(TAG, "Registered virtual device for node %s (0x%02X) with device_id %u", node->get_name().c_str(),
+             node->get_address(), node->get_device_id());
   }
 
   // Initialize state
@@ -304,7 +338,99 @@ void LoraGateway::handle_poll_response_(const std::vector<uint8_t> &packet, floa
 }
 
 void LoraGateway::process_complete_response_(RemoteNode *node, const std::vector<uint8_t> &payload) {
-  // TODO: Phase 4 - Implement sensor deserialization and update
+  ESP_LOGD(TAG, "Processing complete response from node %s (0x%02X), payload size: %d bytes", node->get_name().c_str(),
+           node->get_address(), payload.size());
+
+  size_t offset = 0;
+  int sensor_count = 0;
+  int binary_sensor_count = 0;
+
+  while (offset < payload.size()) {
+    // Check if we have at least 1 byte for the key
+    if (offset >= payload.size()) {
+      break;
+    }
+
+    uint8_t key = payload[offset++];
+
+    if (key == lora_protocol::SENSOR_KEY) {
+      // Deserialize sensor: [SENSOR_KEY:1][float_value:4][name_len:1][name:N]
+      if (offset + 4 >= payload.size()) {
+        ESP_LOGW(TAG, "Incomplete sensor data at offset %d", offset - 1);
+        break;
+      }
+
+      // Extract float value (4 bytes, IEEE 754)
+      float value;
+      memcpy(&value, &payload[offset], sizeof(float));
+      offset += 4;
+
+      // Extract name length
+      if (offset >= payload.size()) {
+        ESP_LOGW(TAG, "Missing name length at offset %d", offset);
+        break;
+      }
+      uint8_t name_len = payload[offset++];
+
+      // Extract name
+      if (offset + name_len > payload.size()) {
+        ESP_LOGW(TAG, "Incomplete name at offset %d (expected %d bytes, have %d)", offset, name_len,
+                 payload.size() - offset);
+        break;
+      }
+      std::string name(payload.begin() + offset, payload.begin() + offset + name_len);
+      offset += name_len;
+
+      // Get or create sensor and publish state
+      auto *sens = node->get_or_create_sensor(name);
+      if (sens != nullptr) {
+        sens->publish_state(value);
+        sensor_count++;
+        ESP_LOGD(TAG, "  Sensor '%s' = %.2f", name.c_str(), value);
+      }
+
+    } else if (key == lora_protocol::BINARY_SENSOR_KEY) {
+      // Deserialize binary sensor: [BINARY_SENSOR_KEY:1][bool_value:1][name_len:1][name:N]
+      if (offset >= payload.size()) {
+        ESP_LOGW(TAG, "Missing binary sensor value at offset %d", offset - 1);
+        break;
+      }
+
+      // Extract bool value
+      bool value = (payload[offset++] != 0);
+
+      // Extract name length
+      if (offset >= payload.size()) {
+        ESP_LOGW(TAG, "Missing name length at offset %d", offset);
+        break;
+      }
+      uint8_t name_len = payload[offset++];
+
+      // Extract name
+      if (offset + name_len > payload.size()) {
+        ESP_LOGW(TAG, "Incomplete name at offset %d (expected %d bytes, have %d)", offset, name_len,
+                 payload.size() - offset);
+        break;
+      }
+      std::string name(payload.begin() + offset, payload.begin() + offset + name_len);
+      offset += name_len;
+
+      // Get or create binary sensor and publish state
+      auto *sens = node->get_or_create_binary_sensor(name);
+      if (sens != nullptr) {
+        sens->publish_state(value);
+        binary_sensor_count++;
+        ESP_LOGD(TAG, "  Binary Sensor '%s' = %s", name.c_str(), value ? "ON" : "OFF");
+      }
+
+    } else {
+      ESP_LOGW(TAG, "Unknown key 0x%02X at offset %d, skipping rest of payload", key, offset - 1);
+      break;
+    }
+  }
+
+  ESP_LOGI(TAG, "Updated %d sensors and %d binary sensors from node %s (0x%02X)", sensor_count, binary_sensor_count,
+           node->get_name().c_str(), node->get_address());
 }
 
 void LoraGateway::handle_timeout_(RemoteNode *node) {
@@ -315,8 +441,22 @@ void LoraGateway::handle_timeout_(RemoteNode *node) {
 
   // Handle stale sensor behavior
   if (this->stale_behavior_ == StaleSensorBehavior::INVALIDATE) {
-    // TODO: Phase 4 - Invalidate all sensors for this node
-    ESP_LOGD(TAG, "Would invalidate sensors for node 0x%02X (not implemented yet)", node->get_address());
+    // Invalidate all sensors by publishing NaN
+    auto &sensors = node->get_sensors();
+    for (auto &kv : sensors) {
+      if (kv.second != nullptr) {
+        kv.second->publish_state(NAN);
+      }
+    }
+    // Invalidate all binary sensors by publishing unknown state
+    auto &binary_sensors = node->get_binary_sensors();
+    for (auto &kv : binary_sensors) {
+      if (kv.second != nullptr) {
+        kv.second->publish_state(false);  // Binary sensors don't have "unknown" state, use false
+      }
+    }
+    ESP_LOGD(TAG, "Invalidated %d sensors and %d binary sensors for node 0x%02X", sensors.size(), binary_sensors.size(),
+             node->get_address());
   }
 
   // Clear any partial responses from this node

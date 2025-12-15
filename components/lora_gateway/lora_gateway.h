@@ -39,6 +39,9 @@ class RemoteNode {
   sensor::Sensor *get_or_create_sensor(const std::string &name);
   binary_sensor::BinarySensor *get_or_create_binary_sensor(const std::string &name);
 
+  std::map<std::string, sensor::Sensor *> &get_sensors() { return this->sensors_; }
+  std::map<std::string, binary_sensor::BinarySensor *> &get_binary_sensors() { return this->binary_sensors_; }
+
  protected:
   uint8_t address_{0};
   std::string name_;
