@@ -466,7 +466,71 @@ void LoraGateway::handle_timeout_(RemoteNode *node) {
 }
 
 void LoraGateway::update_metrics_sensors_() {
-  // TODO: Phase 5 - Implement metrics sensor updates
+  // Update timeout list sensor
+  if (this->timeout_list_sensor_ != nullptr) {
+    std::string timeout_list;
+    bool first = true;
+    for (auto *node : this->remote_nodes_) {
+      auto &metrics = node->get_metrics();
+      if (!metrics.last_response_received) {
+        if (!first) {
+          timeout_list += ", ";
+        }
+        char buf[32];
+        snprintf(buf, sizeof(buf), "0x%02X: timeout", node->get_address());
+        timeout_list += buf;
+        first = false;
+      }
+    }
+    if (timeout_list.empty()) {
+      timeout_list = "none";
+    }
+    this->timeout_list_sensor_->publish_state(timeout_list);
+  }
+
+  // Update last heard list sensor
+  if (this->last_heard_list_sensor_ != nullptr) {
+    std::string last_heard_list;
+    bool first = true;
+    for (auto *node : this->remote_nodes_) {
+      if (!first) {
+        last_heard_list += ", ";
+      }
+      char buf[64];
+      auto &metrics = node->get_metrics();
+      if (metrics.last_heard_ms == 0) {
+        snprintf(buf, sizeof(buf), "0x%02X: never", node->get_address());
+      } else {
+        snprintf(buf, sizeof(buf), "0x%02X: %u", node->get_address(), metrics.last_heard_ms);
+      }
+      last_heard_list += buf;
+      first = false;
+    }
+    this->last_heard_list_sensor_->publish_state(last_heard_list);
+  }
+
+  // Update signal quality list sensor
+  if (this->signal_quality_list_sensor_ != nullptr) {
+    std::string signal_quality_list;
+    bool first = true;
+    for (auto *node : this->remote_nodes_) {
+      auto &metrics = node->get_metrics();
+      if (metrics.last_heard_ms > 0) {  // Only show nodes we've heard from
+        if (!first) {
+          signal_quality_list += ", ";
+        }
+        char buf[64];
+        snprintf(buf, sizeof(buf), "0x%02X: RSSI=%.1fdBm SNR=%.1fdB", node->get_address(), metrics.last_rssi,
+                 metrics.last_snr);
+        signal_quality_list += buf;
+        first = false;
+      }
+    }
+    if (signal_quality_list.empty()) {
+      signal_quality_list = "no data";
+    }
+    this->signal_quality_list_sensor_->publish_state(signal_quality_list);
+  }
 }
 
 RemoteNode *LoraGateway::find_node_by_address_(uint8_t address) {

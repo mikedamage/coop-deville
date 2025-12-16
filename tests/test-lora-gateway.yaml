@@ -68,6 +68,7 @@ time:
     timezone: America/New_York
 
 lora_gateway:
+  id: lora_gw
   sx126x_id: ${lora_module_id}
   address: 0x01
   response_timeout: 2s
@@ -83,3 +84,13 @@ lora_gateway:
     - id: test_node_2
       address: 0x03
       name: Test Node 2
+
+text_sensor:
+  - platform: lora_gateway
+    lora_gateway_id: lora_gw
+    timeout_list:
+      name: "Gateway Timeout List"
+    last_heard_list:
+      name: "Gateway Last Heard"
+    signal_quality_list:
+      name: "Gateway Signal Quality"
