@@ -92,7 +92,9 @@ binary_sensor:
 lora_remote_node:
   sx126x_id: ${lora_module_id}
   address: 0x02
+  auth_key: "0102030405060708090a0b0c0d0e0f10"
   time_id: sntp_time
+  listen_window: 50ms
   sensors:
     - test_battery_voltage
     - test_solar_voltage

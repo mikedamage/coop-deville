@@ -6,6 +6,8 @@ Replace the push-based `packet_transport` system with a star-topology polling ar
 
 The gateway will also periodically broadcast time synchronization packets to keep remote nodes' RTCs synchronized, enabling accurate timekeeping on nodes without reliable WiFi/NTP access.
 
+All packets are authenticated using SipHash-2-4 with a mandatory pre-shared 16-byte key, with sequence numbers providing anti-replay protection. Remote nodes support scheduled listen windows to reduce radio power consumption by sleeping between their assigned poll slots.
+
 ## Components
 
 - **`lora_gateway`**: Gateway component that polls remote nodes and forwards their sensor data to Home Assistant
@@ -21,7 +23,18 @@ The gateway will also periodically broadcast time synchronization packets to kee
 
 ### Packet Formats
 
-All multi-byte integers use little-endian byte order.
+All multi-byte integers use little-endian byte order. All packets carry a 4-byte authentication footer appended after the body.
+
+#### Authentication Footer (all packets)
+
+```
+Byte N-3:    Sequence number low byte
+Byte N-2:    Sequence number high byte (uint16_t LE)
+Byte N-1:    Auth tag low byte
+Byte N:      Auth tag high byte (uint16_t LE, SipHash-2-4 truncated to 16 bits)
+```
+
+The auth tag is computed over the body + sequence number bytes using SipHash-2-4 with a pre-shared 16-byte key. Sequence numbers provide anti-replay protection via a sliding window of 256.
 
 #### Poll Request Packet (Gateway → Remote Node)
 
@@ -29,9 +42,10 @@ All multi-byte integers use little-endian byte order.
 Byte 0:      Gateway address (1 byte)
 Byte 1:      Target address (1 byte)
 Byte 2:      Command: 0x01 = POLL_REQUEST
+Bytes 3-6:   Auth footer (4 bytes)
 ```
 
-Total: 3 bytes
+Total: 7 bytes
 
 #### Poll Response Packet (Remote Node → Gateway)
 
@@ -41,19 +55,27 @@ Byte 1:      Destination address (1 byte)
 Byte 2:      Command: 0x02 = POLL_RESPONSE
 Byte 3:      Packet number (1 byte): 0x00 for single packet, 0x01-0xNN for multi-packet
 Byte 4:      Total packets (1 byte): 0x01 for single packet, 0x02-0xNN for multi-packet
-Bytes 5+:    Payload (sensor data)
+Bytes 5-N:   Payload (sensor data)
+Last 4:      Auth footer (4 bytes)
 ```
 
 #### Time Sync Broadcast Packet (Gateway → All Remote Nodes)
+
+Includes schedule information so remote nodes can compute their poll slot timing for listen window optimization.
 
 ```
 Byte 0:      Gateway address (1 byte)
 Byte 1:      Broadcast address 0xFF (1 byte)
 Byte 2:      Command: 0x03 = TIME_SYNC
-Bytes 3-6:   Timestamp (4 bytes, uint32_t, seconds since epoch)
+Bytes 3-6:   Timestamp (4 bytes, uint32_t LE, seconds since epoch)
+Bytes 7-10:  Poll interval (4 bytes, uint32_t LE, milliseconds)
+Bytes 11-12: Slot duration (2 bytes, uint16_t LE, milliseconds)
+Byte 13:     Node count (1 byte)
+Bytes 14+:   Node addresses in poll order (node_count bytes)
+Last 4:      Auth footer (4 bytes)
 ```
 
-Total: 7 bytes
+Total: 18 + node_count bytes
 
 #### Acknowledgment Packet (Gateway → Remote Node)
 
@@ -63,9 +85,10 @@ Sent after successfully receiving a complete poll response (optional, configurab
 Byte 0:      Gateway address (1 byte)
 Byte 1:      Target address (1 byte)
 Byte 2:      Command: 0x04 = ACK
+Bytes 3-6:   Auth footer (4 bytes)
 ```
 
-Total: 3 bytes
+Total: 7 bytes
 
 #### Sensor Data Payload Format
 
@@ -88,7 +111,8 @@ For each binary sensor:
 ### Packet Size Constraints
 
 - Maximum LoRa packet size: 255 bytes (sx126x limit)
-- If sensor data exceeds 255 - 5 = 250 bytes (accounting for header), split into multiple packets
+- Auth footer overhead: 4 bytes (2-byte seq + 2-byte tag)
+- If sensor data exceeds 255 - 5 - 4 = 246 bytes (accounting for header + auth), split into multiple packets
 - Multi-packet responses use sequential packet numbers starting at 0x01
 
 ## Implementation Phases
@@ -116,7 +140,7 @@ esphome/components/lora_remote_node/
 
 ### Step 1.2: Define Protocol Constants
 
-Create a shared header for protocol constants (decide whether to duplicate or share):
+Create `lora_protocol.h` duplicated into both component directories (no cross-component includes in ESPHome):
 
 ```cpp
 // Protocol commands
@@ -132,13 +156,27 @@ const uint8_t BINARY_SENSOR_KEY = 0x02;
 // Special addresses
 const uint8_t BROADCAST_ADDRESS = 0xFF;
 
-// Packet structure
+// Authentication
+const size_t AUTH_KEY_SIZE = 16;      // SipHash-2-4 key size
+const size_t AUTH_TAG_SIZE = 2;       // Truncated SipHash tag
+const size_t SEQ_NUM_SIZE = 2;        // Sequence number
+const size_t AUTH_OVERHEAD = SEQ_NUM_SIZE + AUTH_TAG_SIZE;  // 4 bytes total
+const uint16_t SEQ_WINDOW_SIZE = 256; // Anti-replay sliding window
+
+// Packet structure (sizes include auth overhead)
 const size_t MAX_PACKET_SIZE = 255;
-const size_t POLL_REQUEST_SIZE = 3;
+const size_t POLL_REQUEST_SIZE = 3 + AUTH_OVERHEAD;   // 7
 const size_t POLL_RESPONSE_HEADER_SIZE = 5;
-const size_t TIME_SYNC_PACKET_SIZE = 7;
-const size_t ACK_PACKET_SIZE = 3;
-const size_t MAX_PAYLOAD_SIZE = MAX_PACKET_SIZE - POLL_RESPONSE_HEADER_SIZE;
+const size_t ACK_PACKET_SIZE = 3 + AUTH_OVERHEAD;     // 7
+const size_t MAX_PAYLOAD_SIZE = MAX_PACKET_SIZE - POLL_RESPONSE_HEADER_SIZE - AUTH_OVERHEAD;  // 246
+
+// Time sync schedule offsets
+const size_t TIME_SYNC_HEADER_SIZE = 14;  // 3 header + 4 timestamp + 4 poll_interval + 2 slot_duration + 1 node_count
+
+// Scheduling
+const uint32_t SLOT_MARGIN_MS = 200;          // Extra margin per slot beyond response_timeout
+const uint32_t DEFAULT_GUARD_WINDOW_MS = 50;  // Default listen window guard (ms)
+const uint8_t MAX_MISSED_POLLS = 5;           // Consecutive misses before fallback to continuous RX
 ```
 
 ### Step 1.3: Define Common Data Structures
@@ -164,6 +202,8 @@ DEPENDENCIES = ["sx126x"]
 
 CONF_SX126X_ID = "sx126x_id"
 CONF_ADDRESS = "address"
+CONF_AUTH_KEY = "auth_key"
+CONF_LISTEN_WINDOW = "listen_window"
 
 lora_remote_node_ns = cg.esphome_ns.namespace("lora_remote_node")
 LoraRemoteNode = lora_remote_node_ns.class_("LoraRemoteNode", cg.Component)
@@ -171,8 +211,10 @@ LoraRemoteNode = lora_remote_node_ns.class_("LoraRemoteNode", cg.Component)
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(LoraRemoteNode),
     cv.Required(CONF_SX126X_ID): cv.use_id(sx126x.SX126x),
-    cv.Required(CONF_ADDRESS): cv.hex_uint8_t,
-    cv.Required(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
+    cv.Required(CONF_ADDRESS): cv.All(cv.hex_uint8_t, validate_address_range),
+    cv.Required(CONF_AUTH_KEY): validate_auth_key,
+    cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
+    cv.Optional(CONF_LISTEN_WINDOW): cv.positive_time_period_milliseconds,
     cv.Optional(CONF_SENSORS, default=[]): cv.ensure_list(cv.use_id(sensor.Sensor)),
     cv.Optional(CONF_BINARY_SENSORS, default=[]): cv.ensure_list(cv.use_id(binary_sensor.BinarySensor)),
 }).extend(cv.COMPONENT_SCHEMA)
@@ -217,12 +259,15 @@ namespace lora_remote_node {
 class LoraRemoteNode : public Component, public sx126x::SX126xListener {
  public:
   void setup() override;
+  void loop() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
   void set_sx126x(sx126x::SX126x *sx126x) { this->sx126x_ = sx126x; }
   void set_address(uint8_t address) { this->address_ = address; }
+  void set_auth_key(const std::vector<uint8_t> &key) { /* copy to auth_key_[16] */ }
   void set_time_source(time::RealTimeClock *time) { this->time_ = time; }
+  void set_listen_window(uint32_t ms) { this->guard_window_ms_ = ms; this->listen_window_enabled_ = true; }
 
   void add_sensor(sensor::Sensor *sensor) { this->sensors_.push_back(sensor); }
   void add_binary_sensor(binary_sensor::BinarySensor *sensor) { this->binary_sensors_.push_back(sensor); }
@@ -233,16 +278,45 @@ class LoraRemoteNode : public Component, public sx126x::SX126xListener {
  protected:
   sx126x::SX126x *sx126x_{nullptr};
   uint8_t address_{0};
+  uint8_t auth_key_[lora_protocol::AUTH_KEY_SIZE]{};
+  uint16_t tx_seq_{0};
+  uint16_t gw_seq_{0};
+  bool gw_seq_initialized_{false};
   time::RealTimeClock *time_{nullptr};
   std::vector<sensor::Sensor *> sensors_;
   std::vector<binary_sensor::BinarySensor *> binary_sensors_;
 
+  // Listen window state
+  bool listen_window_enabled_{false};
+  bool schedule_received_{false};
+  bool radio_sleeping_{false};
+  uint32_t guard_window_ms_{lora_protocol::DEFAULT_GUARD_WINDOW_MS};
+  uint32_t poll_interval_ms_{0};
+  uint32_t slot_duration_ms_{0};
+  uint8_t slot_index_{0};
+  uint32_t next_listen_start_ms_{0};
+  uint32_t next_listen_end_ms_{0};
+  uint8_t consecutive_missed_polls_{0};
+
+  // Auth helpers
+  std::vector<uint8_t> sign_packet_(std::vector<uint8_t> body);
+  bool verify_packet_(const std::vector<uint8_t> &packet, uint16_t &seq_out);
+  bool check_gw_seq_(uint16_t seq);
+
+  // Packet classification and handling
   bool is_poll_request_(const std::vector<uint8_t> &packet);
   bool is_time_sync_(const std::vector<uint8_t> &packet);
+  bool is_ack_(const std::vector<uint8_t> &packet);
   void handle_poll_request_(const std::vector<uint8_t> &packet);
   void handle_time_sync_(const std::vector<uint8_t> &packet);
   std::vector<std::vector<uint8_t>> build_response_packets_(uint8_t gateway_addr);
   std::vector<uint8_t> serialize_sensor_data_();
+
+  // Listen window management
+  void compute_next_listen_window_();
+  void wake_radio_();
+  void sleep_radio_();
+  void fallback_to_continuous_rx_();
 };
 
 }  // namespace lora_remote_node
@@ -252,23 +326,32 @@ class LoraRemoteNode : public Component, public sx126x::SX126xListener {
 ### Step 2.3: Implement Packet Reception Logic
 
 Implement `on_packet()` to:
-- Check packet type (poll request or time sync)
+- Verify minimum packet size (header + auth overhead)
+- **Verify SipHash auth tag before any processing** — drop packets with invalid tags
+- Check sequence number against gateway sequence via sliding window — drop replays
+- Classify packet type (poll request, time sync, or ACK)
 - For poll requests:
-  - Validate packet length >= 3, command == CMD_POLL_REQUEST
+  - Validate packet length >= POLL_REQUEST_SIZE, command == CMD_POLL_REQUEST
   - Check if addressed to this node (target_addr == address_ || target_addr == BROADCAST_ADDRESS)
   - Extract gateway address from packet
   - Trigger `handle_poll_request()`
 - For time sync:
-  - Validate packet length == 7, command == CMD_TIME_SYNC
+  - Validate packet length >= TIME_SYNC_HEADER_SIZE + AUTH_OVERHEAD, command == CMD_TIME_SYNC
   - Check if addressed to broadcast (target_addr == BROADCAST_ADDRESS)
   - Trigger `handle_time_sync()`
+- For ACKs:
+  - Informational only (future retry logic)
 
 ### Step 2.3a: Implement Time Sync Handler
 
 Implement `handle_time_sync()`:
 - Extract 4-byte timestamp from packet (bytes 3-6)
 - Convert little-endian bytes to uint32_t seconds since epoch
-- Set RTC time via `time_->set_time(timestamp)`
+- Set RTC time if time source is configured
+- Extract schedule info: poll_interval (4B), slot_duration (2B), node_count (1B), node addresses
+- Find this node's slot_index in the address list
+- Store schedule parameters for listen window computation
+- On first schedule received with listen windows enabled: transition from continuous RX to windowed mode
 - Log time sync event with debug level
 
 ### Step 2.4: Implement Sensor Serialization
@@ -290,9 +373,12 @@ Implement `build_response_packets()`:
 ### Step 2.6: Implement Response Transmission
 
 Implement `handle_poll_request()`:
-- Build response packets
+- Record `last_poll_received_ms_` for listen window prediction
+- Reset consecutive missed polls counter
+- Build response packets (all signed via `sign_packet_()`)
 - Transmit each packet via `sx126x_->transmit_packet()`
-- Add small delay between multi-packet transmissions (10-20ms) to allow gateway RX turnaround
+- Add small delay between multi-packet transmissions (15ms) to allow gateway RX turnaround
+- If windowed mode is active: compute next listen window and put radio to standby
 
 ### Step 2.7: Code Generation for Remote Node
 
@@ -322,6 +408,7 @@ DEPENDENCIES = ["sx126x"]
 
 CONF_SX126X_ID = "sx126x_id"
 CONF_ADDRESS = "address"
+CONF_AUTH_KEY = "auth_key"
 CONF_REMOTE_NODES = "remote_nodes"
 CONF_RESPONSE_TIMEOUT = "response_timeout"
 CONF_POLL_INTERVAL = "poll_interval"
@@ -348,7 +435,8 @@ REMOTE_NODE_SCHEMA = cv.Schema({
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(LoraGateway),
     cv.Required(CONF_SX126X_ID): cv.use_id(sx126x.SX126x),
-    cv.Required(CONF_ADDRESS): cv.hex_uint8_t,
+    cv.Required(CONF_ADDRESS): cv.All(cv.hex_uint8_t, validate_address_range),
+    cv.Required(CONF_AUTH_KEY): validate_auth_key,
     cv.Required(CONF_REMOTE_NODES): cv.ensure_list(REMOTE_NODE_SCHEMA),
     cv.Required(CONF_RESPONSE_TIMEOUT): cv.positive_time_period_milliseconds,
     cv.Required(CONF_POLL_INTERVAL): cv.positive_time_period_milliseconds,
@@ -419,24 +507,32 @@ class RemoteNode {
   uint8_t get_address() const { return this->address_; }
   void set_address(uint8_t addr) { this->address_ = addr; }
 
-  const char *get_name() const { return this->name_; }
-  void set_name(const char *name) { this->name_ = name; }
+  const std::string &get_name() const { return this->name_; }
+  void set_name(const std::string &name) { this->name_ = name; }
 
   uint32_t get_device_id() const { return this->device_id_; }
   void set_device_id(uint32_t id) { this->device_id_ = id; }
 
   RemoteNodeMetrics &get_metrics() { return this->metrics_; }
 
+  // Per-node inbound sequence tracking for anti-replay
+  uint16_t get_rx_seq() const { return this->rx_seq_; }
+  void set_rx_seq(uint16_t seq) { this->rx_seq_ = seq; }
+  bool get_rx_seq_initialized() const { return this->rx_seq_initialized_; }
+  void set_rx_seq_initialized(bool v) { this->rx_seq_initialized_ = v; }
+
   sensor::Sensor *get_or_create_sensor(const std::string &name);
   binary_sensor::BinarySensor *get_or_create_binary_sensor(const std::string &name);
 
  protected:
   uint8_t address_{0};
-  const char *name_{nullptr};
+  std::string name_;
   uint32_t device_id_{0};
   RemoteNodeMetrics metrics_;
   std::map<std::string, sensor::Sensor *> sensors_;
   std::map<std::string, binary_sensor::BinarySensor *> binary_sensors_;
+  uint16_t rx_seq_{0};
+  bool rx_seq_initialized_{false};
 };
 ```
 
@@ -459,6 +555,7 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
 
   void set_sx126x(sx126x::SX126x *sx126x) { this->sx126x_ = sx126x; }
   void set_address(uint8_t address) { this->address_ = address; }
+  void set_auth_key(const std::vector<uint8_t> &key) { /* copy to auth_key_[16] */ }
   void set_response_timeout(uint32_t timeout_ms) { this->response_timeout_ms_ = timeout_ms; }
   void set_poll_interval(uint32_t interval_ms) { this->poll_interval_ms_ = interval_ms; }
   void set_time_source(time::RealTimeClock *time) { this->time_ = time; }
@@ -479,6 +576,8 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
  protected:
   sx126x::SX126x *sx126x_{nullptr};
   uint8_t address_{0};
+  uint8_t auth_key_[lora_protocol::AUTH_KEY_SIZE]{};
+  uint16_t tx_seq_{0};
   uint32_t response_timeout_ms_{0};
   uint32_t poll_interval_ms_{0};
   uint32_t time_sync_interval_ms_{0};
@@ -489,7 +588,9 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
   std::vector<RemoteNode *> remote_nodes_;
   size_t current_poll_index_{0};
   uint32_t last_poll_start_ms_{0};
+  uint32_t cycle_start_ms_{0};
   uint32_t last_time_sync_ms_{0};
+  uint32_t slot_duration_ms_{0};
   bool waiting_for_response_{false};
   RemoteNode *current_node_{nullptr};
 
@@ -501,14 +602,21 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
   text_sensor::TextSensor *last_heard_list_sensor_{nullptr};
   text_sensor::TextSensor *signal_quality_list_sensor_{nullptr};
 
+  // Auth helpers
+  std::vector<uint8_t> sign_packet_(std::vector<uint8_t> body);
+  bool verify_packet_(const std::vector<uint8_t> &packet, uint16_t &seq_out);
+  bool check_seq_(RemoteNode *node, uint16_t seq);
+
+  void start_new_cycle_();
   void poll_next_node_();
   void send_poll_request_(RemoteNode *node);
-  void send_ack_(RemoteNode *node);
+  void send_ack_packet_(RemoteNode *node);
   void broadcast_time_sync_();
   void handle_poll_response_(const std::vector<uint8_t> &packet, float rssi, float snr);
   void process_complete_response_(RemoteNode *node, const std::vector<uint8_t> &payload);
   void handle_timeout_(RemoteNode *node);
   void update_metrics_sensors_();
+  RemoteNode *find_node_by_address_(uint8_t address);
 
   bool should_start_polling_();
 };
@@ -520,8 +628,9 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
 ### Step 3.4: Implement Setup and Initialization
 
 Implement `setup()`:
-- Register as SX126x listener
-- Validate configuration (addresses, remote nodes, etc.)
+- Compute `slot_duration_ms_ = response_timeout_ms_ + SLOT_MARGIN_MS`
+- Validate that `poll_interval_ms_ >= slot_duration_ms_ * node_count` (adjust if shorter)
+- Register virtual devices for each remote node (sequential device_id starting at 1)
 - Set initial state (current_poll_index = 0, waiting_for_response = false)
 
 Implement `should_start_polling()`:
@@ -529,33 +638,42 @@ Implement `should_start_polling()`:
 - If time source configured, check if time is valid (not 1970, etc.)
 - Return true only when time is synced
 
-### Step 3.5: Implement Polling State Machine
+### Step 3.5: Implement Fixed-Slot Polling State Machine
+
+The gateway uses fixed time slots to ensure predictable poll timing that remote nodes can anticipate for listen windows.
 
 Implement `loop()`:
 - If not `should_start_polling()`, return early
-- Check if time sync interval elapsed (if time_sync_interval_ms_ > 0):
-  - If `millis() - last_time_sync_ms_ > time_sync_interval_ms_`: call `broadcast_time_sync()`
 - If `waiting_for_response_`:
   - Check if timeout elapsed: `millis() - last_poll_start_ms_ > response_timeout_ms_`
-  - If timeout: call `handle_timeout()`, set `waiting_for_response_ = false`, schedule next poll
-- If not `waiting_for_response_`:
-  - Check if poll interval elapsed since last cycle
-  - If elapsed: call `poll_next_node()`
+  - If timeout: call `handle_timeout()`, set `waiting_for_response_ = false`
+  - Return (wait for slot boundary)
+- Check if it's time to start a new cycle:
+  - If `cycle_start_ms_ == 0` or `millis() - cycle_start_ms_ >= poll_interval_ms_`: call `start_new_cycle_()`
+- Within a cycle: check if current slot boundary has been reached:
+  - `slot_start = cycle_start_ms_ + current_poll_index_ * slot_duration_ms_`
+  - If `millis() >= slot_start`: call `poll_next_node_()`
 
-Implement `poll_next_node()`:
+Implement `start_new_cycle_()`:
+- Set `cycle_start_ms_ = millis()`
+- Reset `current_poll_index_ = 0`
+- Broadcast time sync if interval has elapsed
+
+Implement `poll_next_node_()`:
 - Get next node from `remote_nodes_[current_poll_index_]`
-- Send poll request
+- Send signed poll request
 - Set `waiting_for_response_ = true`
 - Set `current_node_` pointer
 - Record `last_poll_start_ms_ = millis()`
-- Increment `current_poll_index_` (wrap around at end of list)
+- Increment `current_poll_index_`
 
 ### Step 3.5a: Implement Time Sync Broadcast
 
 Implement `broadcast_time_sync()`:
-- Check if time source is configured, if not return early
+- Check if time source is configured and valid, if not return early
 - Get current time from time component: `time_->now().timestamp` (seconds since epoch, uint32_t)
-- Build packet: [gateway_address_][BROADCAST_ADDRESS][CMD_TIME_SYNC][4 bytes timestamp in little-endian]
+- Build packet body: [gateway_address_][BROADCAST_ADDRESS][CMD_TIME_SYNC][4B timestamp LE][4B poll_interval LE][2B slot_duration LE][1B node_count][node addresses in poll order]
+- Sign packet via `sign_packet_()` (appends seq + auth tag)
 - Call `sx126x_->transmit_packet(packet)`
 - Update `last_time_sync_ms_ = millis()`
 - Log time sync broadcast with debug level
@@ -563,27 +681,32 @@ Implement `broadcast_time_sync()`:
 ### Step 3.6: Implement Poll Request Transmission
 
 Implement `send_poll_request()`:
-- Build packet: [gateway_address_][node->get_address()][CMD_POLL_REQUEST]
+- Build body: [gateway_address_][node->get_address()][CMD_POLL_REQUEST]
+- Sign via `sign_packet_()` (appends seq + auth tag)
 - Call `sx126x_->transmit_packet(packet)`
 
 ### Step 3.7: Implement Response Reception
 
 Implement `on_packet()`:
-- Validate packet is poll response (length >= 5, command == CMD_POLL_RESPONSE)
-- Validate destination address matches gateway address
-- Extract source address and find corresponding RemoteNode
-- If not `waiting_for_response_` or source doesn't match `current_node_`, ignore (late/duplicate)
-- Extract packet number and total packets
+- Validate packet size >= POLL_RESPONSE_HEADER_SIZE + AUTH_OVERHEAD
+- Validate command == CMD_POLL_RESPONSE, destination matches gateway address
+- **Verify SipHash auth tag** — drop packets with invalid tags
+- Find RemoteNode by source address
+- Validate `waiting_for_response_` and source matches `current_node_`
+- **Check per-node sequence number** via sliding window — drop replays
+- Extract payload between header and auth footer
 - If single packet (packet_num=0, total=1): call `process_complete_response()` immediately
 - If multi-packet: store in `partial_responses_[source_addr]`, check if complete, then process
 - Update node metrics (RSSI, SNR, latency, last_heard)
+- Send ACK if enabled
 - Set `waiting_for_response_ = false`
 
 ### Step 3.7a: Implement ACK Transmission
 
-Implement `send_ack()`:
+Implement `send_ack_packet_()`:
 - Check if `send_ack_` is enabled, if not return early
-- Build packet: [gateway_address_][node->get_address()][CMD_ACK]
+- Build body: [gateway_address_][node->get_address()][CMD_ACK]
+- Sign via `sign_packet_()` (appends seq + auth tag)
 - Call `sx126x_->transmit_packet(packet)`
 - Log ACK sent with debug level
 
@@ -731,6 +854,68 @@ Add validation logic:
 
 ---
 
+## Phase 6a: Protocol Security and Battery Efficiency ✅
+
+Added post-Phase 6 to harden the protocol before hardware testing.
+
+### Step 6a.1: SipHash-2-4 Authentication ✅
+
+Created `siphash.h` (header-only, duplicated into both component directories):
+- Pure C++ SipHash-2-4 implementation (128-bit key, 64-bit output)
+- `compute_auth_tag(key, data, len)` returns a 16-bit truncated tag
+- All functions marked `inline` for header-only use
+
+All packets now carry a 4-byte authentication footer:
+- 2-byte sequence number (uint16_t LE) for anti-replay
+- 2-byte auth tag (SipHash-2-4 truncated to 16 bits)
+- Tag is computed over the body + sequence number bytes
+- Sequence numbers use a sliding window of 256 for replay rejection
+- Gateway tracks per-node inbound sequences; remote nodes track gateway sequence
+
+Configuration:
+- `auth_key` is **required** in both `lora_gateway` and `lora_remote_node` schemas
+- Accepts 32-character hex string or base64-encoded 16-byte key
+- Address range validation added (0x01–0xFE)
+
+### Step 6a.2: Scheduled Listen Windows ✅
+
+Remote nodes can now duty-cycle their radio to save power by sleeping between poll slots.
+
+**Timing analysis** (DS3231 RTC at ±2 ppm drift is negligible vs ESP32 loop jitter):
+- DS3231 drift at 60s sync interval: ±0.12 ms (negligible)
+- ESP32 crystal-to-crystal variance: ±1.2 ms per 60s (negligible)
+- ESPHome `loop()` jitter: ±16 ms (dominant factor)
+- SX1262 standby-to-RX transition: ~0.5 ms
+- Practical minimum guard window: ~34 ms + 10 ms padding ≈ **50 ms default**
+
+**Gateway changes:**
+- Fixed time-slot polling: `slot_duration = response_timeout + 200ms`
+- `setup()` validates `poll_interval >= slot_duration * node_count`
+- Time sync broadcast extended with schedule info (poll_interval, slot_duration, node list in poll order)
+- Slots are time-anchored: node[i] is polled at `cycle_start + i * slot_duration`
+
+**Remote node changes:**
+- Starts in continuous RX (radio always listening)
+- On first time sync with schedule: extracts slot_index, transitions to windowed mode
+- `loop()` manages listen window state machine:
+  - Sleeps radio to standby RC between windows (~0.6 µA, ~3.5 µs wake)
+  - Wakes radio for guard window centered on predicted poll arrival
+  - Re-anchors timing on each successful poll (not just time syncs)
+- Falls back to continuous RX after 5 consecutive missed polls
+- `listen_window` config option (optional): sets guard window duration in ms
+
+**Files created:**
+- `components/lora_gateway/siphash.h`
+- `components/lora_remote_node/siphash.h`
+
+**Files modified:**
+- `components/*/lora_protocol.h` — auth constants, schedule offsets, timing constants
+- `components/*/__init__.py` — `auth_key` (required), `listen_window` (optional), validators
+- `components/*/*.h` — auth fields, listen window state, new method declarations
+- `components/*/*.cpp` — auth signing/verification, fixed-slot polling, listen window state machine
+
+---
+
 ## Phase 7: Testing and Debugging
 
 ### Step 7.1: Create Test Configuration for Remote Node
@@ -740,7 +925,9 @@ Create a minimal test config:
 lora_remote_node:
   sx126x_id: lora_radio
   address: 0x02
-  time_id: internal_rtc
+  auth_key: "0102030405060708090a0b0c0d0e0f10"
+  time_id: sntp_time
+  listen_window: 50ms
   sensors:
     - battery_voltage
     - solar_voltage
@@ -757,6 +944,7 @@ Create a minimal test config:
 lora_gateway:
   sx126x_id: lora_radio
   address: 0x01
+  auth_key: "0102030405060708090a0b0c0d0e0f10"
   response_timeout: 2s
   poll_interval: 10s
   time_id: sntp_time
@@ -869,10 +1057,10 @@ Document:
    - Configurable max retry count
    - Exponential backoff with jitter to avoid repeated collisions
 
-2. **Encryption & Authentication**
-   - Add XXTEA encryption option (from packet_transport)
-   - Add shared key authentication
-   - Add rolling code anti-replay protection
+2. ~~**Encryption & Authentication**~~ → **Implemented in Phase 6a**
+   - ✅ SipHash-2-4 authentication with 16-byte pre-shared key
+   - ✅ Sequence number anti-replay with sliding window
+   - Remaining: XXTEA or ChaCha20 encryption for payload confidentiality (if needed)
 
 3. **Adaptive Timeouts**
    - Track response latency per node
@@ -883,10 +1071,12 @@ Document:
    - Allow remote nodes to send unsolicited urgent packets
    - Gateway checks for urgent messages between polls
 
-5. **Wake Windows**
-   - Remote nodes deep sleep and wake periodically
-   - Gateway synchronizes polling with wake windows
-   - Optimize power consumption
+5. ~~**Wake Windows**~~ → **Implemented in Phase 6a as "Listen Windows"**
+   - ✅ Remote nodes sleep radio between poll slots (standby RC mode)
+   - ✅ Gateway broadcasts schedule via time sync for slot prediction
+   - ✅ Configurable guard window (default 50ms)
+   - ✅ Automatic fallback to continuous RX after missed polls
+   - Remaining: full ESP32 deep sleep between windows (requires external wake source)
 
 6. **Collision Avoidance**
    - Use sx126x CAD (Channel Activity Detection)
@@ -911,7 +1101,10 @@ Document:
 - ✅ Multi-packet responses work for large payloads
 - ✅ Metrics sensors provide visibility into network health
 - ✅ Time synchronization broadcasts keep remote nodes' RTCs in sync
-- ✅ Code compiles without errors
+- ✅ All packets authenticated via SipHash-2-4 with pre-shared key
+- ✅ Anti-replay protection via sequence numbers with sliding window
+- ✅ Remote nodes duty-cycle radio using scheduled listen windows
+- ✅ Code compiles without errors or warnings
 - ✅ Configurations are clean and maintainable
 
 ---

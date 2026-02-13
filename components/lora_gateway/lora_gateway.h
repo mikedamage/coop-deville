@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <map>
 #include <string>
 #include <vector>
@@ -11,6 +12,7 @@
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/time/real_time_clock.h"
 #include "lora_protocol.h"
+#include "siphash.h"
 
 namespace esphome {
 namespace lora_gateway {
@@ -36,6 +38,11 @@ class RemoteNode {
 
   RemoteNodeMetrics &get_metrics() { return this->metrics_; }
 
+  uint16_t get_rx_seq() const { return this->rx_seq_; }
+  void set_rx_seq(uint16_t seq) { this->rx_seq_ = seq; }
+  bool get_rx_seq_initialized() const { return this->rx_seq_initialized_; }
+  void set_rx_seq_initialized(bool v) { this->rx_seq_initialized_ = v; }
+
   sensor::Sensor *get_or_create_sensor(const std::string &name);
   binary_sensor::BinarySensor *get_or_create_binary_sensor(const std::string &name);
 
@@ -49,6 +56,10 @@ class RemoteNode {
   RemoteNodeMetrics metrics_;
   std::map<std::string, sensor::Sensor *> sensors_;
   std::map<std::string, binary_sensor::BinarySensor *> binary_sensors_;
+
+  // Per-node inbound sequence tracking for anti-replay
+  uint16_t rx_seq_{0};
+  bool rx_seq_initialized_{false};
 };
 
 enum class StaleSensorBehavior : uint8_t {
@@ -65,6 +76,9 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
 
   void set_sx126x(sx126x::SX126x *sx126x) { this->sx126x_ = sx126x; }
   void set_address(uint8_t address) { this->address_ = address; }
+  void set_auth_key(const std::vector<uint8_t> &key) {
+    std::copy_n(key.begin(), std::min(key.size(), (size_t) lora_protocol::AUTH_KEY_SIZE), this->auth_key_);
+  }
   void set_response_timeout(uint32_t timeout_ms) { this->response_timeout_ms_ = timeout_ms; }
   void set_poll_interval(uint32_t interval_ms) { this->poll_interval_ms_ = interval_ms; }
   void set_time_source(time::RealTimeClock *time) { this->time_ = time; }
@@ -85,6 +99,8 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
  protected:
   sx126x::SX126x *sx126x_{nullptr};
   uint8_t address_{0};
+  uint8_t auth_key_[lora_protocol::AUTH_KEY_SIZE]{};
+  uint16_t tx_seq_{0};
   uint32_t response_timeout_ms_{0};
   uint32_t poll_interval_ms_{0};
   uint32_t time_sync_interval_ms_{0};
@@ -95,8 +111,9 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
   std::vector<RemoteNode *> remote_nodes_;
   size_t current_poll_index_{0};
   uint32_t last_poll_start_ms_{0};
-  uint32_t last_poll_cycle_ms_{0};
+  uint32_t cycle_start_ms_{0};
   uint32_t last_time_sync_ms_{0};
+  uint32_t slot_duration_ms_{0};
   bool waiting_for_response_{false};
   RemoteNode *current_node_{nullptr};
 
@@ -108,6 +125,12 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
   text_sensor::TextSensor *last_heard_list_sensor_{nullptr};
   text_sensor::TextSensor *signal_quality_list_sensor_{nullptr};
 
+  // Packet construction with auth
+  std::vector<uint8_t> sign_packet_(std::vector<uint8_t> body);
+  bool verify_packet_(const std::vector<uint8_t> &packet, uint16_t &seq_out);
+  bool check_seq_(RemoteNode *node, uint16_t seq);
+
+  void start_new_cycle_();
   void poll_next_node_();
   void send_poll_request_(RemoteNode *node);
   void send_ack_packet_(RemoteNode *node);

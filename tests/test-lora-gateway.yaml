@@ -71,6 +71,7 @@ lora_gateway:
   id: lora_gw
   sx126x_id: ${lora_module_id}
   address: 0x01
+  auth_key: "0102030405060708090a0b0c0d0e0f10"
   response_timeout: 2s
   poll_interval: 10s
   time_id: sntp_time

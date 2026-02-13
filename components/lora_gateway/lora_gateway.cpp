@@ -6,7 +6,64 @@ namespace lora_gateway {
 
 static const char *const TAG = "lora_gateway";
 
-// RemoteNode implementation
+// --- Auth helpers ---
+
+std::vector<uint8_t> LoraGateway::sign_packet_(std::vector<uint8_t> body) {
+  // Append sequence number (little-endian)
+  uint16_t seq = this->tx_seq_++;
+  body.push_back(static_cast<uint8_t>(seq & 0xFF));
+  body.push_back(static_cast<uint8_t>((seq >> 8) & 0xFF));
+
+  // Compute auth tag over body + seq
+  uint16_t tag = lora_protocol::compute_auth_tag(this->auth_key_, body.data(), body.size());
+  body.push_back(static_cast<uint8_t>(tag & 0xFF));
+  body.push_back(static_cast<uint8_t>((tag >> 8) & 0xFF));
+
+  return body;
+}
+
+bool LoraGateway::verify_packet_(const std::vector<uint8_t> &packet, uint16_t &seq_out) {
+  if (packet.size() < lora_protocol::AUTH_OVERHEAD) {
+    return false;
+  }
+
+  size_t body_plus_seq_len = packet.size() - lora_protocol::AUTH_TAG_SIZE;
+  size_t body_len = packet.size() - lora_protocol::AUTH_OVERHEAD;
+
+  // Extract sequence number
+  seq_out = static_cast<uint16_t>(packet[body_len]) | (static_cast<uint16_t>(packet[body_len + 1]) << 8);
+
+  // Extract received tag
+  uint16_t received_tag =
+      static_cast<uint16_t>(packet[body_plus_seq_len]) | (static_cast<uint16_t>(packet[body_plus_seq_len + 1]) << 8);
+
+  // Compute expected tag over body + seq (everything except the tag itself)
+  uint16_t expected_tag = lora_protocol::compute_auth_tag(this->auth_key_, packet.data(), body_plus_seq_len);
+
+  return received_tag == expected_tag;
+}
+
+bool LoraGateway::check_seq_(RemoteNode *node, uint16_t seq) {
+  if (!node->get_rx_seq_initialized()) {
+    // First packet from this node — accept and initialize
+    node->set_rx_seq(seq);
+    node->set_rx_seq_initialized(true);
+    return true;
+  }
+
+  uint16_t last = node->get_rx_seq();
+  // Accept if seq is within [last+1, last+WINDOW_SIZE] (modular arithmetic)
+  uint16_t diff = seq - last;  // wraps correctly for uint16_t
+  if (diff >= 1 && diff <= lora_protocol::SEQ_WINDOW_SIZE) {
+    node->set_rx_seq(seq);
+    return true;
+  }
+
+  ESP_LOGW(TAG, "Sequence number rejected: got %u, expected after %u", seq, last);
+  return false;
+}
+
+// --- RemoteNode implementation ---
 
 sensor::Sensor *RemoteNode::get_or_create_sensor(const std::string &name) {
   auto it = this->sensors_.find(name);
@@ -14,19 +71,13 @@ sensor::Sensor *RemoteNode::get_or_create_sensor(const std::string &name) {
     return it->second;
   }
 
-  // Create new sensor dynamically
   auto *sens = new sensor::Sensor();
-  sens->set_name(name.c_str());
-  sens->set_object_id((this->name_ + "_" + name).c_str());
-  sens->set_device_class("none");
-  sens->set_internal(false);  // Make sure it's published to Home Assistant
+  sens->set_name((this->name_ + " " + name).c_str());
+  sens->set_internal(false);
 
-  // Store in map
   this->sensors_[name] = sens;
-
   ESP_LOGD("lora_gateway", "Created new sensor '%s' for node %s (0x%02X)", name.c_str(), this->name_.c_str(),
            this->address_);
-
   return sens;
 }
 
@@ -36,23 +87,17 @@ binary_sensor::BinarySensor *RemoteNode::get_or_create_binary_sensor(const std::
     return it->second;
   }
 
-  // Create new binary sensor dynamically
   auto *sens = new binary_sensor::BinarySensor();
-  sens->set_name(name.c_str());
-  sens->set_object_id((this->name_ + "_" + name).c_str());
-  sens->set_device_class("none");
-  sens->set_internal(false);  // Make sure it's published to Home Assistant
+  sens->set_name((this->name_ + " " + name).c_str());
+  sens->set_internal(false);
 
-  // Store in map
   this->binary_sensors_[name] = sens;
-
   ESP_LOGD("lora_gateway", "Created new binary sensor '%s' for node %s (0x%02X)", name.c_str(), this->name_.c_str(),
            this->address_);
-
   return sens;
 }
 
-// LoraGateway implementation
+// --- LoraGateway implementation ---
 
 void LoraGateway::setup() {
   ESP_LOGCONFIG(TAG, "Setting up LoRa Gateway...");
@@ -62,8 +107,19 @@ void LoraGateway::setup() {
     return;
   }
 
+  // Compute slot duration from response timeout
+  this->slot_duration_ms_ = this->response_timeout_ms_ + lora_protocol::SLOT_MARGIN_MS;
+
+  // Validate that poll_interval is sufficient for all slots
+  uint32_t min_cycle = this->slot_duration_ms_ * this->remote_nodes_.size();
+  if (this->poll_interval_ms_ < min_cycle) {
+    ESP_LOGW(TAG, "poll_interval (%u ms) is shorter than minimum cycle duration (%u ms). Adjusting to %u ms.",
+             this->poll_interval_ms_, min_cycle, min_cycle);
+    this->poll_interval_ms_ = min_cycle;
+  }
+
   // Register virtual devices for each remote node
-  uint32_t device_id = 1;  // Start device IDs at 1
+  uint32_t device_id = 1;
   for (auto *node : this->remote_nodes_) {
     node->set_device_id(device_id++);
     ESP_LOGD(TAG, "Registered virtual device for node %s (0x%02X) with device_id %u", node->get_name().c_str(),
@@ -74,16 +130,18 @@ void LoraGateway::setup() {
   this->current_poll_index_ = 0;
   this->waiting_for_response_ = false;
   this->last_poll_start_ms_ = 0;
-  this->last_poll_cycle_ms_ = 0;
+  this->cycle_start_ms_ = 0;
   this->last_time_sync_ms_ = 0;
 
-  ESP_LOGI(TAG, "Gateway configured with %d remote nodes", this->remote_nodes_.size());
+  ESP_LOGI(TAG, "Gateway configured: %d nodes, slot=%ums, cycle=%ums, poll_interval=%ums", this->remote_nodes_.size(),
+           this->slot_duration_ms_, min_cycle, this->poll_interval_ms_);
 }
 
 void LoraGateway::dump_config() {
   ESP_LOGCONFIG(TAG, "LoRa Gateway:");
   ESP_LOGCONFIG(TAG, "  Address: 0x%02X", this->address_);
   ESP_LOGCONFIG(TAG, "  Response Timeout: %u ms", this->response_timeout_ms_);
+  ESP_LOGCONFIG(TAG, "  Slot Duration: %u ms", this->slot_duration_ms_);
   ESP_LOGCONFIG(TAG, "  Poll Interval: %u ms", this->poll_interval_ms_);
   if (this->time_sync_interval_ms_ > 0) {
     ESP_LOGCONFIG(TAG, "  Time Sync Interval: %u ms", this->time_sync_interval_ms_);
@@ -91,6 +149,7 @@ void LoraGateway::dump_config() {
   ESP_LOGCONFIG(TAG, "  Send ACK: %s", this->send_ack_ ? "true" : "false");
   ESP_LOGCONFIG(TAG, "  Stale Sensor Behavior: %s",
                 this->stale_behavior_ == StaleSensorBehavior::KEEP_LAST_VALUE ? "keep" : "invalidate");
+  ESP_LOGCONFIG(TAG, "  Auth: SipHash-2-4 (16-byte key)");
   ESP_LOGCONFIG(TAG, "  Remote Nodes:");
   for (auto *node : this->remote_nodes_) {
     ESP_LOGCONFIG(TAG, "    - %s (0x%02X)", node->get_name().c_str(), node->get_address());
@@ -98,34 +157,33 @@ void LoraGateway::dump_config() {
 }
 
 void LoraGateway::loop() {
-  // Wait for time to be valid before starting polling (if time source configured)
   if (!this->should_start_polling_()) {
     return;
   }
 
   uint32_t now = millis();
 
-  // Check if time sync interval has elapsed
-  if (this->time_sync_interval_ms_ > 0 && this->time_ != nullptr) {
-    if (now - this->last_time_sync_ms_ >= this->time_sync_interval_ms_) {
-      this->broadcast_time_sync_();
-    }
-  }
-
   // Handle response timeout
   if (this->waiting_for_response_) {
     if (now - this->last_poll_start_ms_ >= this->response_timeout_ms_) {
-      // Timeout occurred
       this->handle_timeout_(this->current_node_);
       this->waiting_for_response_ = false;
     }
-    // Still waiting for response, don't start new poll
     return;
   }
 
-  // Check if poll interval has elapsed since last poll cycle started
-  if (now - this->last_poll_cycle_ms_ >= this->poll_interval_ms_) {
-    this->poll_next_node_();
+  // Check if it's time to start a new cycle
+  if (this->cycle_start_ms_ == 0 || now - this->cycle_start_ms_ >= this->poll_interval_ms_) {
+    this->start_new_cycle_();
+    return;
+  }
+
+  // Within a cycle: check if it's time for the next slot
+  if (this->current_poll_index_ < this->remote_nodes_.size()) {
+    uint32_t slot_start = this->cycle_start_ms_ + this->current_poll_index_ * this->slot_duration_ms_;
+    if (now >= slot_start) {
+      this->poll_next_node_();
+    }
   }
 }
 
@@ -133,9 +191,21 @@ bool LoraGateway::should_start_polling_() {
   if (this->time_ == nullptr) {
     return true;
   }
-  // Wait for time to be valid before starting polling
   auto now = this->time_->now();
   return now.is_valid();
+}
+
+void LoraGateway::start_new_cycle_() {
+  this->cycle_start_ms_ = millis();
+  this->current_poll_index_ = 0;
+
+  // Broadcast time sync at the start of each cycle (if interval elapsed)
+  if (this->time_sync_interval_ms_ > 0 && this->time_ != nullptr) {
+    uint32_t now = millis();
+    if (now - this->last_time_sync_ms_ >= this->time_sync_interval_ms_) {
+      this->broadcast_time_sync_();
+    }
+  }
 }
 
 void LoraGateway::poll_next_node_() {
@@ -143,33 +213,24 @@ void LoraGateway::poll_next_node_() {
     return;
   }
 
-  // Get the next node to poll
   this->current_node_ = this->remote_nodes_[this->current_poll_index_];
-
-  // Send poll request
   this->send_poll_request_(this->current_node_);
 
-  // Update state
   this->waiting_for_response_ = true;
   this->last_poll_start_ms_ = millis();
-
-  // Advance to next node for the next poll cycle
-  this->current_poll_index_ = (this->current_poll_index_ + 1) % this->remote_nodes_.size();
-
-  // If we've wrapped around, update the poll cycle timestamp
-  if (this->current_poll_index_ == 0) {
-    this->last_poll_cycle_ms_ = millis();
-  }
+  this->current_poll_index_++;
 }
 
 void LoraGateway::send_poll_request_(RemoteNode *node) {
-  std::vector<uint8_t> packet;
-  packet.push_back(this->address_);                   // Gateway address
-  packet.push_back(node->get_address());              // Target node address
-  packet.push_back(lora_protocol::CMD_POLL_REQUEST);  // Command
+  std::vector<uint8_t> body;
+  body.push_back(this->address_);
+  body.push_back(node->get_address());
+  body.push_back(lora_protocol::CMD_POLL_REQUEST);
 
+  auto packet = this->sign_packet_(std::move(body));
   this->sx126x_->transmit_packet(packet);
-  ESP_LOGD(TAG, "Sent poll request to node 0x%02X (%s)", node->get_address(), node->get_name().c_str());
+  ESP_LOGD(TAG, "Sent poll request to node 0x%02X (%s) [seq=%u]", node->get_address(), node->get_name().c_str(),
+           this->tx_seq_ - 1);
 }
 
 void LoraGateway::send_ack_packet_(RemoteNode *node) {
@@ -177,11 +238,12 @@ void LoraGateway::send_ack_packet_(RemoteNode *node) {
     return;
   }
 
-  std::vector<uint8_t> packet;
-  packet.push_back(this->address_);          // Gateway address
-  packet.push_back(node->get_address());     // Target node address
-  packet.push_back(lora_protocol::CMD_ACK);  // Command
+  std::vector<uint8_t> body;
+  body.push_back(this->address_);
+  body.push_back(node->get_address());
+  body.push_back(lora_protocol::CMD_ACK);
 
+  auto packet = this->sign_packet_(std::move(body));
   this->sx126x_->transmit_packet(packet);
   ESP_LOGD(TAG, "Sent ACK to node 0x%02X", node->get_address());
 }
@@ -191,86 +253,121 @@ void LoraGateway::broadcast_time_sync_() {
     return;
   }
 
-  auto now = this->time_->now();
-  if (!now.is_valid()) {
+  auto now_time = this->time_->now();
+  if (!now_time.is_valid()) {
     ESP_LOGW(TAG, "Cannot broadcast time sync - time not valid");
     return;
   }
 
-  uint32_t timestamp = now.timestamp;
+  uint32_t timestamp = now_time.timestamp;
 
-  std::vector<uint8_t> packet;
-  packet.push_back(this->address_);                    // Gateway address
-  packet.push_back(lora_protocol::BROADCAST_ADDRESS);  // Broadcast to all nodes
-  packet.push_back(lora_protocol::CMD_TIME_SYNC);      // Command
-  // Add timestamp in little-endian format
-  packet.push_back(static_cast<uint8_t>(timestamp & 0xFF));
-  packet.push_back(static_cast<uint8_t>((timestamp >> 8) & 0xFF));
-  packet.push_back(static_cast<uint8_t>((timestamp >> 16) & 0xFF));
-  packet.push_back(static_cast<uint8_t>((timestamp >> 24) & 0xFF));
+  std::vector<uint8_t> body;
+  body.push_back(this->address_);
+  body.push_back(lora_protocol::BROADCAST_ADDRESS);
+  body.push_back(lora_protocol::CMD_TIME_SYNC);
 
+  // Timestamp (4 bytes LE)
+  body.push_back(static_cast<uint8_t>(timestamp & 0xFF));
+  body.push_back(static_cast<uint8_t>((timestamp >> 8) & 0xFF));
+  body.push_back(static_cast<uint8_t>((timestamp >> 16) & 0xFF));
+  body.push_back(static_cast<uint8_t>((timestamp >> 24) & 0xFF));
+
+  // Poll interval (4 bytes LE)
+  body.push_back(static_cast<uint8_t>(this->poll_interval_ms_ & 0xFF));
+  body.push_back(static_cast<uint8_t>((this->poll_interval_ms_ >> 8) & 0xFF));
+  body.push_back(static_cast<uint8_t>((this->poll_interval_ms_ >> 16) & 0xFF));
+  body.push_back(static_cast<uint8_t>((this->poll_interval_ms_ >> 24) & 0xFF));
+
+  // Slot duration (2 bytes LE)
+  body.push_back(static_cast<uint8_t>(this->slot_duration_ms_ & 0xFF));
+  body.push_back(static_cast<uint8_t>((this->slot_duration_ms_ >> 8) & 0xFF));
+
+  // Node count
+  body.push_back(static_cast<uint8_t>(this->remote_nodes_.size()));
+
+  // Node addresses in poll order
+  for (auto *node : this->remote_nodes_) {
+    body.push_back(node->get_address());
+  }
+
+  auto packet = this->sign_packet_(std::move(body));
   this->sx126x_->transmit_packet(packet);
   this->last_time_sync_ms_ = millis();
-  ESP_LOGD(TAG, "Broadcasted time sync: %u", timestamp);
+  ESP_LOGD(TAG, "Broadcasted time sync: epoch=%u, poll_interval=%u, slot_duration=%u, nodes=%d", timestamp,
+           this->poll_interval_ms_, this->slot_duration_ms_, this->remote_nodes_.size());
 }
 
 void LoraGateway::on_packet(const std::vector<uint8_t> &packet, float rssi, float snr) {
-  // Validate minimum packet size
-  if (packet.size() < lora_protocol::POLL_RESPONSE_HEADER_SIZE) {
+  // Minimum size: header (5) + auth overhead (4) = 9 bytes
+  if (packet.size() < lora_protocol::POLL_RESPONSE_HEADER_SIZE + lora_protocol::AUTH_OVERHEAD) {
     ESP_LOGD(TAG, "Received packet too small (%d bytes), ignoring", packet.size());
     return;
   }
 
-  // Check if this is a poll response
+  // Check command byte (before auth strip — command is in the body)
   if (packet[lora_protocol::OFFSET_COMMAND] != lora_protocol::CMD_POLL_RESPONSE) {
     ESP_LOGD(TAG, "Received non-poll-response packet (cmd=0x%02X), ignoring", packet[lora_protocol::OFFSET_COMMAND]);
     return;
   }
 
-  // Check if packet is addressed to this gateway
+  // Check destination address
   uint8_t dst_addr = packet[lora_protocol::OFFSET_DST_ADDR];
   if (dst_addr != this->address_) {
     ESP_LOGD(TAG, "Received packet not addressed to this gateway (dst=0x%02X), ignoring", dst_addr);
     return;
   }
 
-  // Handle the poll response
+  // Verify authentication
+  uint16_t seq;
+  if (!this->verify_packet_(packet, seq)) {
+    ESP_LOGW(TAG, "Received packet with invalid auth tag, dropping");
+    return;
+  }
+
   this->handle_poll_response_(packet, rssi, snr);
 }
 
 void LoraGateway::handle_poll_response_(const std::vector<uint8_t> &packet, float rssi, float snr) {
-  // Extract source address
   uint8_t src_addr = packet[lora_protocol::OFFSET_SRC_ADDR];
 
-  // Find the node
   RemoteNode *node = this->find_node_by_address_(src_addr);
   if (node == nullptr) {
     ESP_LOGW(TAG, "Received response from unknown node 0x%02X", src_addr);
     return;
   }
 
-  // Check if we're waiting for a response
   if (!this->waiting_for_response_) {
     ESP_LOGD(TAG, "Received late/duplicate response from node 0x%02X, ignoring", src_addr);
     return;
   }
 
-  // Check if this is from the node we're currently polling
   if (node != this->current_node_) {
     ESP_LOGD(TAG, "Received response from node 0x%02X but expecting 0x%02X, ignoring", src_addr,
              this->current_node_->get_address());
     return;
   }
 
-  // Extract packet number and total packets
+  // Check sequence number (extract from verified packet)
+  uint16_t seq;
+  // Re-extract seq (we already verified the packet)
+  size_t body_len = packet.size() - lora_protocol::AUTH_OVERHEAD;
+  seq = static_cast<uint16_t>(packet[body_len]) | (static_cast<uint16_t>(packet[body_len + 1]) << 8);
+
+  if (!this->check_seq_(node, seq)) {
+    ESP_LOGW(TAG, "Replay detected from node 0x%02X, dropping", src_addr);
+    return;
+  }
+
+  // Extract packet number and total packets from the body (before auth footer)
   uint8_t packet_num = packet[lora_protocol::OFFSET_PACKET_NUM];
   uint8_t total_packets = packet[lora_protocol::OFFSET_TOTAL_PACKETS];
 
   ESP_LOGD(TAG, "Received poll response from node 0x%02X (%s), packet %d/%d (RSSI: %.1f, SNR: %.1f)", src_addr,
            node->get_name().c_str(), packet_num == 0 ? 1 : packet_num, total_packets, rssi, snr);
 
-  // Extract payload
-  std::vector<uint8_t> payload(packet.begin() + lora_protocol::OFFSET_PAYLOAD, packet.end());
+  // Extract payload: between header and auth footer
+  size_t payload_end = packet.size() - lora_protocol::AUTH_OVERHEAD;
+  std::vector<uint8_t> payload(packet.begin() + lora_protocol::OFFSET_PAYLOAD, packet.begin() + payload_end);
 
   // Update metrics
   auto &metrics = node->get_metrics();
@@ -282,21 +379,17 @@ void LoraGateway::handle_poll_response_(const std::vector<uint8_t> &packet, floa
 
   // Handle single-packet vs multi-packet response
   if (packet_num == 0 && total_packets == 1) {
-    // Single packet response - process immediately
     this->waiting_for_response_ = false;
     this->process_complete_response_(node, payload);
     this->send_ack_packet_(node);
     this->update_metrics_sensors_();
   } else {
-    // Multi-packet response
     auto &partial = this->partial_responses_[src_addr];
 
-    // Ensure we have enough space for all packets
     if (partial.size() < total_packets) {
       partial.resize(total_packets);
     }
 
-    // Store this packet's payload (packet_num is 1-indexed for multi-packet)
     if (packet_num > 0 && packet_num <= total_packets) {
       partial[packet_num - 1] = payload;
     } else {
@@ -304,7 +397,6 @@ void LoraGateway::handle_poll_response_(const std::vector<uint8_t> &packet, floa
       return;
     }
 
-    // Check if we have all packets
     bool complete = true;
     for (const auto &p : partial) {
       if (p.empty()) {
@@ -314,16 +406,12 @@ void LoraGateway::handle_poll_response_(const std::vector<uint8_t> &packet, floa
     }
 
     if (complete) {
-      // Concatenate all payloads
       std::vector<uint8_t> complete_payload;
       for (const auto &p : partial) {
         complete_payload.insert(complete_payload.end(), p.begin(), p.end());
       }
 
-      // Clear partial responses
       this->partial_responses_.erase(src_addr);
-
-      // Process complete response
       this->waiting_for_response_ = false;
       this->process_complete_response_(node, complete_payload);
       this->send_ack_packet_(node);
@@ -346,33 +434,24 @@ void LoraGateway::process_complete_response_(RemoteNode *node, const std::vector
   int binary_sensor_count = 0;
 
   while (offset < payload.size()) {
-    // Check if we have at least 1 byte for the key
-    if (offset >= payload.size()) {
-      break;
-    }
-
     uint8_t key = payload[offset++];
 
     if (key == lora_protocol::SENSOR_KEY) {
-      // Deserialize sensor: [SENSOR_KEY:1][float_value:4][name_len:1][name:N]
       if (offset + 4 >= payload.size()) {
         ESP_LOGW(TAG, "Incomplete sensor data at offset %d", offset - 1);
         break;
       }
 
-      // Extract float value (4 bytes, IEEE 754)
       float value;
       memcpy(&value, &payload[offset], sizeof(float));
       offset += 4;
 
-      // Extract name length
       if (offset >= payload.size()) {
         ESP_LOGW(TAG, "Missing name length at offset %d", offset);
         break;
       }
       uint8_t name_len = payload[offset++];
 
-      // Extract name
       if (offset + name_len > payload.size()) {
         ESP_LOGW(TAG, "Incomplete name at offset %d (expected %d bytes, have %d)", offset, name_len,
                  payload.size() - offset);
@@ -381,7 +460,6 @@ void LoraGateway::process_complete_response_(RemoteNode *node, const std::vector
       std::string name(payload.begin() + offset, payload.begin() + offset + name_len);
       offset += name_len;
 
-      // Get or create sensor and publish state
       auto *sens = node->get_or_create_sensor(name);
       if (sens != nullptr) {
         sens->publish_state(value);
@@ -390,23 +468,19 @@ void LoraGateway::process_complete_response_(RemoteNode *node, const std::vector
       }
 
     } else if (key == lora_protocol::BINARY_SENSOR_KEY) {
-      // Deserialize binary sensor: [BINARY_SENSOR_KEY:1][bool_value:1][name_len:1][name:N]
       if (offset >= payload.size()) {
         ESP_LOGW(TAG, "Missing binary sensor value at offset %d", offset - 1);
         break;
       }
 
-      // Extract bool value
       bool value = (payload[offset++] != 0);
 
-      // Extract name length
       if (offset >= payload.size()) {
         ESP_LOGW(TAG, "Missing name length at offset %d", offset);
         break;
       }
       uint8_t name_len = payload[offset++];
 
-      // Extract name
       if (offset + name_len > payload.size()) {
         ESP_LOGW(TAG, "Incomplete name at offset %d (expected %d bytes, have %d)", offset, name_len,
                  payload.size() - offset);
@@ -415,7 +489,6 @@ void LoraGateway::process_complete_response_(RemoteNode *node, const std::vector
       std::string name(payload.begin() + offset, payload.begin() + offset + name_len);
       offset += name_len;
 
-      // Get or create binary sensor and publish state
       auto *sens = node->get_or_create_binary_sensor(name);
       if (sens != nullptr) {
         sens->publish_state(value);
@@ -439,34 +512,28 @@ void LoraGateway::handle_timeout_(RemoteNode *node) {
   auto &metrics = node->get_metrics();
   metrics.last_response_received = false;
 
-  // Handle stale sensor behavior
   if (this->stale_behavior_ == StaleSensorBehavior::INVALIDATE) {
-    // Invalidate all sensors by publishing NaN
     auto &sensors = node->get_sensors();
     for (auto &kv : sensors) {
       if (kv.second != nullptr) {
         kv.second->publish_state(NAN);
       }
     }
-    // Invalidate all binary sensors by publishing unknown state
     auto &binary_sensors = node->get_binary_sensors();
     for (auto &kv : binary_sensors) {
       if (kv.second != nullptr) {
-        kv.second->publish_state(false);  // Binary sensors don't have "unknown" state, use false
+        kv.second->publish_state(false);
       }
     }
     ESP_LOGD(TAG, "Invalidated %d sensors and %d binary sensors for node 0x%02X", sensors.size(), binary_sensors.size(),
              node->get_address());
   }
 
-  // Clear any partial responses from this node
   this->partial_responses_.erase(node->get_address());
-
   this->update_metrics_sensors_();
 }
 
 void LoraGateway::update_metrics_sensors_() {
-  // Update timeout list sensor
   if (this->timeout_list_sensor_ != nullptr) {
     std::string timeout_list;
     bool first = true;
@@ -488,7 +555,6 @@ void LoraGateway::update_metrics_sensors_() {
     this->timeout_list_sensor_->publish_state(timeout_list);
   }
 
-  // Update last heard list sensor
   if (this->last_heard_list_sensor_ != nullptr) {
     std::string last_heard_list;
     bool first = true;
@@ -509,13 +575,12 @@ void LoraGateway::update_metrics_sensors_() {
     this->last_heard_list_sensor_->publish_state(last_heard_list);
   }
 
-  // Update signal quality list sensor
   if (this->signal_quality_list_sensor_ != nullptr) {
     std::string signal_quality_list;
     bool first = true;
     for (auto *node : this->remote_nodes_) {
       auto &metrics = node->get_metrics();
-      if (metrics.last_heard_ms > 0) {  // Only show nodes we've heard from
+      if (metrics.last_heard_ms > 0) {
         if (!first) {
           signal_quality_list += ", ";
         }

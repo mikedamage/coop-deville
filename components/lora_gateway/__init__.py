@@ -1,3 +1,5 @@
+import base64
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import sx126x, time as time_component
@@ -8,6 +10,7 @@ DEPENDENCIES = ["sx126x"]
 AUTO_LOAD = ["sensor", "binary_sensor", "text_sensor", "time"]
 
 CONF_SX126X_ID = "sx126x_id"
+CONF_AUTH_KEY = "auth_key"
 CONF_REMOTE_NODES = "remote_nodes"
 CONF_RESPONSE_TIMEOUT = "response_timeout"
 CONF_POLL_INTERVAL = "poll_interval"
@@ -41,6 +44,31 @@ def validate_address_range(value):
     return value
 
 
+def validate_auth_key(value):
+    """Validate and parse a 16-byte authentication key.
+
+    Accepts either a 32-character hex string or a base64-encoded 16-byte key.
+    """
+    value = cv.string(value)
+    # Try hex string (32 hex chars = 16 bytes)
+    cleaned = value.replace(" ", "").replace(":", "").replace("-", "")
+    if len(cleaned) == 32:
+        try:
+            return list(bytes.fromhex(cleaned))
+        except ValueError:
+            pass
+    # Try base64
+    try:
+        decoded = base64.b64decode(value)
+        if len(decoded) == 16:
+            return list(decoded)
+    except Exception:
+        pass
+    raise cv.Invalid(
+        "Auth key must be a 32-character hex string or base64-encoded 16-byte key"
+    )
+
+
 def validate_unique_addresses(config):
     """Validate that all remote node addresses are unique."""
     addresses = [node[CONF_ADDRESS] for node in config[CONF_REMOTE_NODES]]
@@ -55,6 +83,7 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(LoraGateway),
             cv.Required(CONF_SX126X_ID): cv.use_id(sx126x.SX126x),
             cv.Required(CONF_ADDRESS): cv.All(cv.hex_uint8_t, validate_address_range),
+            cv.Required(CONF_AUTH_KEY): validate_auth_key,
             cv.Required(CONF_REMOTE_NODES): cv.ensure_list(REMOTE_NODE_SCHEMA),
             cv.Required(CONF_RESPONSE_TIMEOUT): cv.positive_time_period_milliseconds,
             cv.Required(CONF_POLL_INTERVAL): cv.positive_time_period_milliseconds,
@@ -78,6 +107,7 @@ async def to_code(config):
     cg.add(var.set_sx126x(radio))
     cg.add(radio.register_listener(var))
     cg.add(var.set_address(config[CONF_ADDRESS]))
+    cg.add(var.set_auth_key(config[CONF_AUTH_KEY]))
     cg.add(var.set_response_timeout(config[CONF_RESPONSE_TIMEOUT]))
     cg.add(var.set_poll_interval(config[CONF_POLL_INTERVAL]))
     cg.add(var.set_send_ack(config[CONF_SEND_ACK]))
