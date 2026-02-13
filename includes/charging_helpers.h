@@ -1,7 +1,1 @@
-enum ChargePhase {
-  Off,
-  Discharging,
-  Bulk,
-  Absorption,
-  Float
-};
+enum ChargePhase { Off, Discharging, Bulk, Absorption, Float };
