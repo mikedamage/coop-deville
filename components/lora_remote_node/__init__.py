@@ -3,7 +3,13 @@ import base64
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import sx126x, sensor, binary_sensor, time as time_component
-from esphome.const import CONF_ID, CONF_SENSORS, CONF_BINARY_SENSORS, CONF_TIME_ID, CONF_ADDRESS
+from esphome.const import (
+    CONF_ID,
+    CONF_SENSORS,
+    CONF_BINARY_SENSORS,
+    CONF_TIME_ID,
+    CONF_ADDRESS,
+)
 
 CODEOWNERS = ["@mikedamage"]
 DEPENDENCIES = ["sx126x"]

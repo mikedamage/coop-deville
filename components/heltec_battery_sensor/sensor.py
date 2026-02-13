@@ -8,7 +8,7 @@ from esphome.const import (
     UNIT_PERCENT,
     UNIT_VOLT,
     ICON_BATTERY,
-    ICON_PERCENT
+    ICON_PERCENT,
 )
 
 ns = cg.esphome_ns.namespace("heltec_battery_sensor")
@@ -16,7 +16,7 @@ HeltecBatterySensor = ns.class_("HeltecBatterySensor", cg.PollingComponent)
 
 CONFIG_SCHEMA = cv.Schema(
     {
-        cv.GenerateID():  cv.declare_id(HeltecBatterySensor),
+        cv.GenerateID(): cv.declare_id(HeltecBatterySensor),
         cv.Required(CONF_BATTERY_VOLTAGE): sensor.sensor_schema(
             unit_of_measurement=UNIT_VOLT,
             icon=ICON_BATTERY,
@@ -29,6 +29,7 @@ CONFIG_SCHEMA = cv.Schema(
         ),
     }
 ).extend(cv.polling_component_schema("60s"))
+
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
