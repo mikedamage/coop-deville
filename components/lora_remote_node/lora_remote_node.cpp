@@ -42,6 +42,9 @@ bool LoraRemoteNode::check_gw_seq_(uint16_t seq) {
   if (!this->gw_seq_initialized_) {
     this->gw_seq_ = seq;
     this->gw_seq_initialized_ = true;
+    // New gateway detected — force a full sensor update on next poll
+    this->force_next_full_update_ = true;
+    ESP_LOGD(TAG, "New gateway detected, will send full update on next poll");
     return true;
   }
 
@@ -80,6 +83,7 @@ void LoraRemoteNode::dump_config() {
   } else {
     ESP_LOGCONFIG(TAG, "  Listen Window: disabled (continuous RX)");
   }
+  ESP_LOGCONFIG(TAG, "  Full Update Interval: every %u polls", this->full_update_interval_);
 }
 
 void LoraRemoteNode::loop() {
@@ -195,10 +199,26 @@ void LoraRemoteNode::handle_poll_request_(const std::vector<uint8_t> &packet) {
   this->last_poll_received_ms_ = millis();
   this->consecutive_missed_polls_ = 0;
 
+  // Determine if this should be a full update
+  bool force_full = this->force_next_full_update_;
+  this->force_next_full_update_ = false;
+
+  if (!force_full) {
+    this->full_update_counter_++;
+    if (this->full_update_counter_ >= this->full_update_interval_) {
+      force_full = true;
+    }
+  }
+
+  if (force_full) {
+    this->full_update_counter_ = 0;
+    ESP_LOGD(TAG, "Sending full sensor update");
+  }
+
   // Mark that we're transmitting a response (prevents listen window from closing)
   this->responding_ = true;
 
-  auto response_packets = this->build_response_packets_(gateway_addr);
+  auto response_packets = this->build_response_packets_(gateway_addr, force_full);
   for (const auto &response : response_packets) {
     this->sx126x_->transmit_packet(response);
     if (response_packets.size() > 1) {
@@ -303,9 +323,9 @@ void LoraRemoteNode::handle_time_sync_(const std::vector<uint8_t> &packet) {
 
 // --- Response building ---
 
-std::vector<std::vector<uint8_t>> LoraRemoteNode::build_response_packets_(uint8_t gateway_addr) {
+std::vector<std::vector<uint8_t>> LoraRemoteNode::build_response_packets_(uint8_t gateway_addr, bool force_full) {
   std::vector<std::vector<uint8_t>> packets;
-  std::vector<uint8_t> payload = this->serialize_sensor_data_();
+  std::vector<uint8_t> payload = this->serialize_sensor_data_(force_full);
 
   if (payload.size() <= lora_protocol::MAX_PAYLOAD_SIZE) {
     // Single packet response
@@ -343,34 +363,69 @@ std::vector<std::vector<uint8_t>> LoraRemoteNode::build_response_packets_(uint8_
   return packets;
 }
 
-std::vector<uint8_t> LoraRemoteNode::serialize_sensor_data_() {
+std::vector<uint8_t> LoraRemoteNode::serialize_sensor_data_(bool force_full) {
   std::vector<uint8_t> data;
+  int skipped = 0;
 
   for (auto *sens : this->sensors_) {
     if (!sens->has_state()) {
       continue;
     }
-    data.push_back(lora_protocol::SENSOR_KEY);
 
     float value = sens->state;
-    uint8_t *value_bytes = reinterpret_cast<uint8_t *>(&value);
-    data.insert(data.end(), value_bytes, value_bytes + 4);
+    std::array<uint8_t, 4> value_bytes{};
+    memcpy(value_bytes.data(), &value, 4);
 
     std::string name = sens->get_name();
+
+    // Check if value changed since last transmission
+    if (!force_full) {
+      auto it = this->last_sent_sensor_values_.find(name);
+      if (it != this->last_sent_sensor_values_.end() && it->second == value_bytes) {
+        skipped++;
+        continue;
+      }
+    }
+
+    // Serialize this sensor
+    data.push_back(lora_protocol::SENSOR_KEY);
+    data.insert(data.end(), value_bytes.begin(), value_bytes.end());
     data.push_back(static_cast<uint8_t>(name.size()));
     data.insert(data.end(), name.begin(), name.end());
+
+    // Update cache
+    this->last_sent_sensor_values_[name] = value_bytes;
   }
 
   for (auto *sens : this->binary_sensors_) {
     if (!sens->has_state()) {
       continue;
     }
-    data.push_back(lora_protocol::BINARY_SENSOR_KEY);
-    data.push_back(sens->state ? 0x01 : 0x00);
 
+    bool value = sens->state;
     std::string name = sens->get_name();
+
+    // Check if value changed since last transmission
+    if (!force_full) {
+      auto it = this->last_sent_binary_values_.find(name);
+      if (it != this->last_sent_binary_values_.end() && it->second == value) {
+        skipped++;
+        continue;
+      }
+    }
+
+    // Serialize this binary sensor
+    data.push_back(lora_protocol::BINARY_SENSOR_KEY);
+    data.push_back(value ? 0x01 : 0x00);
     data.push_back(static_cast<uint8_t>(name.size()));
     data.insert(data.end(), name.begin(), name.end());
+
+    // Update cache
+    this->last_sent_binary_values_[name] = value;
+  }
+
+  if (skipped > 0) {
+    ESP_LOGD(TAG, "Delta compression: skipped %d unchanged sensor(s), sending %d bytes", skipped, data.size());
   }
 
   return data;

@@ -181,6 +181,23 @@ If serialized sensor data exceeds 246 bytes, it is split across multiple respons
 
 The gateway reassembles fragments by source address, concatenating payloads in order. Incomplete assemblies are discarded on timeout.
 
+### Delta Compression
+
+To reduce airtime, remote nodes only transmit sensor values that have **changed since the last poll response**. The gateway treats any sensors absent from a response as "unchanged" and keeps their last published state.
+
+- The remote node caches the last-sent value for each sensor (raw float bytes for sensors, bool for binary sensors)
+- On each poll, only sensors whose current value differs from the cached value are serialized
+- If nothing changed, an empty payload is sent (the gateway still receives RSSI/SNR/liveness metrics)
+- Every `full_update_interval` polls (default: 10), a **full update** is forced containing all sensor values regardless of change, to resync state after gateway restarts or missed responses
+- The first poll is always a full update
+- When a new gateway is detected (sequence number initialization), the next poll forces a full update
+
+**Value comparison**:
+- Float sensors: `memcmp` on the 4 raw IEEE 754 bytes (handles NaN, -0.0; ADC noise filtering should be done via ESPHome sensor `filters:`)
+- Binary sensors: direct `==` comparison
+
+**Configuration**: `full_update_interval` (optional, default 10, range 1-255). Setting to 1 effectively disables delta compression.
+
 ## Polling Timing
 
 ### Fixed Time-Slot Polling
@@ -310,6 +327,7 @@ After **5 consecutive missed polls** (`MAX_MISSED_POLLS`), the node falls back t
 | `auth_key` | string | Yes | — | 16-byte key (hex or base64) |
 | `time_id` | ID | No | — | RealTimeClock for time sync |
 | `listen_window` | time | No | disabled | Guard window duration (enables power saving) |
+| `full_update_interval` | int | No | `10` | Polls between forced full updates (1-255) |
 | `sensors` | list | No | `[]` | Sensor IDs to report |
 | `binary_sensors` | list | No | `[]` | Binary sensor IDs to report |
 

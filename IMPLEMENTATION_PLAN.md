@@ -916,6 +916,38 @@ Remote nodes can now duty-cycle their radio to save power by sleeping between po
 
 ---
 
+## Phase 6b: Delta Compression ✅
+
+Added post-Phase 6a to reduce airtime by skipping unchanged sensor values in poll responses.
+
+### Step 6b.1: Value Caching and Comparison ✅
+
+Remote nodes now cache the last-sent value for each sensor and only serialize sensors whose values have changed since the previous poll response.
+
+- **Float sensors**: compared using `memcmp` on the 4 raw IEEE 754 bytes (handles NaN, -0.0 correctly)
+- **Binary sensors**: direct `==` comparison
+- If nothing changed, an empty payload is sent (gateway still receives RSSI/SNR/liveness metrics)
+- ADC noise filtering is the user's responsibility via ESPHome sensor `filters:` — delta compression operates on the filtered values
+
+### Step 6b.2: Periodic Full Updates ✅
+
+To maintain robustness, a full update (all sensors regardless of change) is forced:
+
+- Every `full_update_interval` polls (configurable, default 10, range 1-255)
+- On the first poll after power-on (`force_next_full_update_` initialized to `true`)
+- When a new gateway is detected (sequence number initialization in `check_gw_seq_()`)
+
+Setting `full_update_interval: 1` effectively disables delta compression.
+
+**No gateway changes required** — `process_complete_response_()` already handles partial payloads correctly. Sensors absent from a response keep their last published value.
+
+**Files modified:**
+- `components/lora_remote_node/lora_remote_node.h` — value cache maps, full update counter/interval, `force_next_full_update_` flag
+- `components/lora_remote_node/lora_remote_node.cpp` — delta-aware `serialize_sensor_data_(bool force_full)`, full update logic in `handle_poll_request_()`, gateway detection trigger in `check_gw_seq_()`
+- `components/lora_remote_node/__init__.py` — `full_update_interval` config option (optional, default 10)
+
+---
+
 ## Phase 7: Testing and Debugging
 
 ### Step 7.1: Create Test Configuration for Remote Node
