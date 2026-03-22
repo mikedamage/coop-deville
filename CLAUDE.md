@@ -10,6 +10,7 @@ Configuration also exists for a gateway node that will be placed in a location w
 
 - Whenever possible, I prefer to avoid lambdas and use declarative YAML configuration.
 - If more than one configration uses substantially similar code, I attempt to refactor it into a package and use substitutions to interpolate values that may differ between devices.
+- When writing C++ components, adhere to ESPHome coding conventions. See CONVENTIONS.md before writing any C++ or Python code
 
 # Sensor Config files
 
