@@ -1,0 +1,84 @@
+external_components:
+  - source:
+      type: local
+      path: components
+
+substitutions:
+  name: test-node
+  logger_level: DEBUG
+  friendly_name: Test Node
+  lora_module_id: sx126x_module
+  lora_pa_power: "10"
+  lora_bandwidth: 125_0kHz
+  lora_frequency: "917500000"
+  lora_spreading_factor: "7"
+  lora_coding_rate: CR_4_5
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: heltec_wifi_lora_32_V3
+  variant: esp32s3
+  cpu_frequency: 160mhz
+  flash_size: 8mb
+  framework:
+    type: arduino
+    version: "3.3.2"
+
+logger:
+  level: ${logger_level}
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  enable_on_boot: false
+  reboot_timeout: 0s
+
+api:
+  reboot_timeout: 0s
+
+spi:
+  clk_pin: GPIO9
+  mosi_pin: GPIO10
+  miso_pin: GPIO11
+  interface: hardware
+
+sx126x:
+  - id: ${lora_module_id}
+    cs_pin: GPIO8
+    rst_pin: GPIO12
+    busy_pin: GPIO13
+    dio1_pin: GPIO14
+    pa_power: ${lora_pa_power}
+    bandwidth: ${lora_bandwidth}
+    modulation: LORA
+    crc_enable: true
+    frequency: ${lora_frequency}
+    hw_version: sx1262
+    rf_switch: false
+    spreading_factor: ${lora_spreading_factor}
+    coding_rate: ${lora_coding_rate}
+    tcxo_voltage: 1_8V
+    tcxo_delay: 5ms
+    sync_value: [0x14, 0x24]
+
+switch:
+  - platform: gpio
+    name: "Test LED"
+    id: test_led
+    pin: GPIO48
+
+binary_sensor:
+  - platform: template
+    name: "Test LED State"
+    id: test_led_state
+    lambda: return id(test_led).state;
+
+lora_remote_node:
+  sx126x_id: ${lora_module_id}
+  address: 0x02
+  auth_key: !secret lora_auth_key
+  binary_sensors:
+    - test_led_state

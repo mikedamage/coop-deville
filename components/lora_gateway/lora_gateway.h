@@ -17,6 +17,29 @@
 namespace esphome {
 namespace lora_gateway {
 
+/// Sensor subclass for entities created dynamically at runtime.
+/// Owns the name string so the non-owning StringRef in EntityBase remains valid.
+class DynamicSensor : public sensor::Sensor {
+ public:
+  explicit DynamicSensor(const std::string &name) : owned_name_(name) {
+    this->configure_entity_(this->owned_name_.c_str(), 0, 0);
+  }
+
+ protected:
+  std::string owned_name_;
+};
+
+/// BinarySensor subclass for entities created dynamically at runtime.
+class DynamicBinarySensor : public binary_sensor::BinarySensor {
+ public:
+  explicit DynamicBinarySensor(const std::string &name) : owned_name_(name) {
+    this->configure_entity_(this->owned_name_.c_str(), 0, 0);
+  }
+
+ protected:
+  std::string owned_name_;
+};
+
 struct RemoteNodeMetrics {
   bool last_response_received{false};
   uint32_t last_heard_ms{0};
@@ -49,6 +72,9 @@ class RemoteNode {
   std::map<std::string, sensor::Sensor *> &get_sensors() { return this->sensors_; }
   std::map<std::string, binary_sensor::BinarySensor *> &get_binary_sensors() { return this->binary_sensors_; }
 
+  void set_max_sensors(size_t max) { this->max_sensors_ = max; }
+  void set_max_binary_sensors(size_t max) { this->max_binary_sensors_ = max; }
+
  protected:
   uint8_t address_{0};
   std::string name_;
@@ -56,6 +82,8 @@ class RemoteNode {
   RemoteNodeMetrics metrics_;
   std::map<std::string, sensor::Sensor *> sensors_;
   std::map<std::string, binary_sensor::BinarySensor *> binary_sensors_;
+  size_t max_sensors_{16};
+  size_t max_binary_sensors_{8};
 
   // Per-node inbound sequence tracking for anti-replay
   uint16_t rx_seq_{0};

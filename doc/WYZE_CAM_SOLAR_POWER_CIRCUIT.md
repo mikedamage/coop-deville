@@ -1,7 +1,7 @@
 # Solar Monitor Circuit Connections (v3)
 
 ## Overview
-Solar-powered monitoring system for Wyze Cam Pan v3. Uses a CN3722-based MPPT charge controller module for battery charging, with custom circuitry limited to monitoring and load switching.
+Solar-powered monitoring system for Wyze Cam Pan v3. Uses a CN3722-based MPPT charge controller module for battery charging, with custom circuitry limited to monitoring and load switching. LoRa (SX1262, 915MHz) provides telemetry and control to minimize WiFi usage and reduce interference with the camera's WiFi connection.
 
 **Key Design Features:**
 - CN3722 module handles all charge regulation (CC/CV, MPPT, reverse protection)
@@ -9,6 +9,7 @@ Solar-powered monitoring system for Wyze Cam Pan v3. Uses a CN3722-based MPPT ch
 - Solar panel voltage via resistor divider (generation indicator)
 - Low-side N-channel MOSFET load switch
 - Temperature monitoring
+- LoRa radio for telemetry/control (WiFi reserved for OTA updates only)
 - 12V LiFePO4 battery
 
 ---
@@ -61,6 +62,8 @@ Solar-powered monitoring system for Wyze Cam Pan v3. Uses a CN3722-based MPPT ch
 
 ## GPIO Assignments
 
+### Custom Circuitry (exposed on headers)
+
 | GPIO | Function | Header | Pin | Description |
 |------|----------|--------|-----|-------------|
 | GPIO5 | ADC In | J3 | 16 | Solar voltage via divider |
@@ -69,9 +72,24 @@ Solar-powered monitoring system for Wyze Cam Pan v3. Uses a CN3722-based MPPT ch
 | GPIO47 | 1-Wire | J2 | 13 | DS18B20 temperature |
 | GPIO48 | Digital Out | J2 | 14 | M1 gate (load switch) |
 
+### SX1262 LoRa Radio (internal to Heltec board)
+
+| GPIO | Function | Description |
+|------|----------|-------------|
+| GPIO8 | NSS (CS) | SPI chip select |
+| GPIO9 | SCK | SPI clock |
+| GPIO10 | MOSI | SPI data out |
+| GPIO11 | MISO | SPI data in |
+| GPIO12 | RST | Radio reset |
+| GPIO13 | BUSY | Radio busy status |
+| GPIO14 | DIO1 | Interrupt line |
+
+**Note:** The LoRa radio is wired internally on the Heltec WiFi LoRa 32 V3 module — no external connections needed. These GPIOs are not available on the headers.
+
 **Routing Strategy:**
 - J3 (left side) = sensing/input signals (ADC, I2C)
 - J2 (right side) = control/output signals (load switch, temp sensor, 5V power)
+- Internal SPI bus = LoRa radio (no header exposure)
 
 ---
 
@@ -152,6 +170,23 @@ Source → GND
 LOAD+ → IC2 VIN-
 LOAD- → M1 Drain
 ```
+
+### SX1262 LoRa Radio (Internal to Heltec Module)
+**Purpose:** 915MHz LoRa for telemetry and control, replacing WiFi as the primary communication link to reduce interference with the Wyze Cam's WiFi connection.
+
+```
+NSS  → GPIO8  (SPI chip select)
+SCK  → GPIO9  (SPI clock)
+MOSI → GPIO10 (SPI data out)
+MISO → GPIO11 (SPI data in)
+RST  → GPIO12 (radio reset)
+BUSY → GPIO13 (busy status)
+DIO1 → GPIO14 (interrupt)
+VCC  → 3.3V (internal)
+GND  → GND (internal)
+```
+
+**No external wiring required.** All connections are internal to the Heltec WiFi LoRa 32 V3 PCB. An external 915MHz antenna connects to the U.FL/SMA connector on the Heltec board.
 
 ### DS18B20 (Temperature Sensor)
 ```

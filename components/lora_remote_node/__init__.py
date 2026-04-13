@@ -13,6 +13,7 @@ from esphome.const import (
 
 CODEOWNERS = ["@mikedamage"]
 DEPENDENCIES = ["sx126x"]
+AUTO_LOAD = ["sensor", "binary_sensor", "time"]
 
 CONF_SX126X_ID = "sx126x_id"
 CONF_AUTH_KEY = "auth_key"

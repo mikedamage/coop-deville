@@ -1,4 +1,5 @@
 #include "lora_gateway.h"
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
 namespace esphome {
@@ -71,9 +72,16 @@ sensor::Sensor *RemoteNode::get_or_create_sensor(const std::string &name) {
     return it->second;
   }
 
-  auto *sens = new sensor::Sensor();
-  sens->set_name((this->name_ + " " + name).c_str());
-  sens->set_internal(false);
+  if (this->sensors_.size() >= this->max_sensors_) {
+    ESP_LOGE("lora_gateway",
+             "Cannot create sensor '%s' for node %s (0x%02X): max_sensors_per_node (%zu) exceeded. Increase "
+             "max_sensors_per_node in the gateway config.",
+             name.c_str(), this->name_.c_str(), this->address_, this->max_sensors_);
+    return nullptr;
+  }
+
+  auto *sens = new DynamicSensor(this->name_ + " " + name);
+  App.register_sensor(sens);
 
   this->sensors_[name] = sens;
   ESP_LOGD("lora_gateway", "Created new sensor '%s' for node %s (0x%02X)", name.c_str(), this->name_.c_str(),
@@ -87,9 +95,16 @@ binary_sensor::BinarySensor *RemoteNode::get_or_create_binary_sensor(const std::
     return it->second;
   }
 
-  auto *sens = new binary_sensor::BinarySensor();
-  sens->set_name((this->name_ + " " + name).c_str());
-  sens->set_internal(false);
+  if (this->binary_sensors_.size() >= this->max_binary_sensors_) {
+    ESP_LOGE("lora_gateway",
+             "Cannot create binary sensor '%s' for node %s (0x%02X): max_binary_sensors_per_node (%zu) exceeded. "
+             "Increase max_binary_sensors_per_node in the gateway config.",
+             name.c_str(), this->name_.c_str(), this->address_, this->max_binary_sensors_);
+    return nullptr;
+  }
+
+  auto *sens = new DynamicBinarySensor(this->name_ + " " + name);
+  App.register_binary_sensor(sens);
 
   this->binary_sensors_[name] = sens;
   ESP_LOGD("lora_gateway", "Created new binary sensor '%s' for node %s (0x%02X)", name.c_str(), this->name_.c_str(),

@@ -4,6 +4,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import sx126x, time as time_component
 from esphome.const import CONF_ID, CONF_NAME, CONF_TIME_ID, CONF_ADDRESS
+from esphome.core import CORE
 
 CODEOWNERS = ["@mikedamage"]
 DEPENDENCIES = ["sx126x"]
@@ -17,6 +18,8 @@ CONF_POLL_INTERVAL = "poll_interval"
 CONF_TIME_SYNC_INTERVAL = "time_sync_interval"
 CONF_SEND_ACK = "send_ack"
 CONF_STALE_SENSOR_BEHAVIOR = "stale_sensor_behavior"
+CONF_MAX_SENSORS_PER_NODE = "max_sensors_per_node"
+CONF_MAX_BINARY_SENSORS_PER_NODE = "max_binary_sensors_per_node"
 
 lora_gateway_ns = cg.esphome_ns.namespace("lora_gateway")
 LoraGateway = lora_gateway_ns.class_("LoraGateway", cg.Component, sx126x.SX126xListener)
@@ -93,6 +96,12 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_STALE_SENSOR_BEHAVIOR, default="keep"): cv.enum(
                 STALE_SENSOR_BEHAVIOR_OPTIONS, lower=True
             ),
+            cv.Optional(CONF_MAX_SENSORS_PER_NODE, default=16): cv.int_range(
+                min=0, max=64
+            ),
+            cv.Optional(CONF_MAX_BINARY_SENSORS_PER_NODE, default=8): cv.int_range(
+                min=0, max=64
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     validate_unique_addresses,
@@ -100,6 +109,14 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def to_code(config):
+    num_nodes = len(config[CONF_REMOTE_NODES])
+    sensor_slots = num_nodes * config[CONF_MAX_SENSORS_PER_NODE]
+    binary_sensor_slots = num_nodes * config[CONF_MAX_BINARY_SENSORS_PER_NODE]
+    for _ in range(sensor_slots):
+        CORE.register_platform_component("sensor", None)
+    for _ in range(binary_sensor_slots):
+        CORE.register_platform_component("binary_sensor", None)
+
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
@@ -124,4 +141,6 @@ async def to_code(config):
         node_var = cg.new_Pvariable(node_config[CONF_ID])
         cg.add(node_var.set_address(node_config[CONF_ADDRESS]))
         cg.add(node_var.set_name(node_config[CONF_NAME]))
+        cg.add(node_var.set_max_sensors(config[CONF_MAX_SENSORS_PER_NODE]))
+        cg.add(node_var.set_max_binary_sensors(config[CONF_MAX_BINARY_SENSORS_PER_NODE]))
         cg.add(var.add_remote_node(node_var))
