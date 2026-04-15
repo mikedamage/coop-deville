@@ -17,29 +17,6 @@
 namespace esphome {
 namespace lora_gateway {
 
-/// Sensor subclass for entities created dynamically at runtime.
-/// Owns the name string so the non-owning StringRef in EntityBase remains valid.
-class DynamicSensor : public sensor::Sensor {
- public:
-  explicit DynamicSensor(const std::string &name) : owned_name_(name) {
-    this->configure_entity_(this->owned_name_.c_str(), 0, 0);
-  }
-
- protected:
-  std::string owned_name_;
-};
-
-/// BinarySensor subclass for entities created dynamically at runtime.
-class DynamicBinarySensor : public binary_sensor::BinarySensor {
- public:
-  explicit DynamicBinarySensor(const std::string &name) : owned_name_(name) {
-    this->configure_entity_(this->owned_name_.c_str(), 0, 0);
-  }
-
- protected:
-  std::string owned_name_;
-};
-
 struct RemoteNodeMetrics {
   bool last_response_received{false};
   uint32_t last_heard_ms{0};
@@ -66,14 +43,18 @@ class RemoteNode {
   bool get_rx_seq_initialized() const { return this->rx_seq_initialized_; }
   void set_rx_seq_initialized(bool v) { this->rx_seq_initialized_ = v; }
 
-  sensor::Sensor *get_or_create_sensor(const std::string &name);
-  binary_sensor::BinarySensor *get_or_create_binary_sensor(const std::string &name);
+  void add_sensor(const std::string &key, sensor::Sensor *sens) { this->sensors_[key] = sens; }
+  void add_binary_sensor(const std::string &key, binary_sensor::BinarySensor *sens) {
+    this->binary_sensors_[key] = sens;
+  }
 
-  std::map<std::string, sensor::Sensor *> &get_sensors() { return this->sensors_; }
-  std::map<std::string, binary_sensor::BinarySensor *> &get_binary_sensors() { return this->binary_sensors_; }
+  sensor::Sensor *find_sensor(const std::string &key) const;
+  binary_sensor::BinarySensor *find_binary_sensor(const std::string &key) const;
 
-  void set_max_sensors(size_t max) { this->max_sensors_ = max; }
-  void set_max_binary_sensors(size_t max) { this->max_binary_sensors_ = max; }
+  const std::map<std::string, sensor::Sensor *> &get_sensors() const { return this->sensors_; }
+  const std::map<std::string, binary_sensor::BinarySensor *> &get_binary_sensors() const {
+    return this->binary_sensors_;
+  }
 
  protected:
   uint8_t address_{0};
@@ -82,8 +63,6 @@ class RemoteNode {
   RemoteNodeMetrics metrics_;
   std::map<std::string, sensor::Sensor *> sensors_;
   std::map<std::string, binary_sensor::BinarySensor *> binary_sensors_;
-  size_t max_sensors_{16};
-  size_t max_binary_sensors_{8};
 
   // Per-node inbound sequence tracking for anti-replay
   uint16_t rx_seq_{0};

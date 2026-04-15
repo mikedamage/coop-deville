@@ -8,7 +8,7 @@ substitutions:
   logger_level: DEBUG
   friendly_name: Test Node
   lora_module_id: sx126x_module
-  lora_pa_power: "10"
+  lora_pa_power: "3"
   lora_bandwidth: 125_0kHz
   lora_frequency: "917500000"
   lora_spreading_factor: "7"
@@ -29,6 +29,13 @@ esp32:
 
 logger:
   level: ${logger_level}
+  hardware_uart: UART0
+  logs:
+    lora_remote_node: DEBUG
+    sx126x: DEBUG
+    component: INFO
+    sensor: INFO
+    binary_sensor: INFO
 
 wifi:
   ssid: !secret wifi_ssid
@@ -76,9 +83,17 @@ binary_sensor:
     id: test_led_state
     lambda: return id(test_led).state;
 
+sensor:
+  - platform: internal_temperature
+    name: "CPU Temperature"
+    id: cpu_temp
+    entity_category: diagnostic
+
 lora_remote_node:
   sx126x_id: ${lora_module_id}
   address: 0x02
   auth_key: !secret lora_auth_key
+  sensors:
+    - cpu_temp
   binary_sensors:
     - test_led_state

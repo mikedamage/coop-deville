@@ -1,5 +1,4 @@
 #include "lora_gateway.h"
-#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
 namespace esphome {
@@ -66,50 +65,14 @@ bool LoraGateway::check_seq_(RemoteNode *node, uint16_t seq) {
 
 // --- RemoteNode implementation ---
 
-sensor::Sensor *RemoteNode::get_or_create_sensor(const std::string &name) {
-  auto it = this->sensors_.find(name);
-  if (it != this->sensors_.end()) {
-    return it->second;
-  }
-
-  if (this->sensors_.size() >= this->max_sensors_) {
-    ESP_LOGE("lora_gateway",
-             "Cannot create sensor '%s' for node %s (0x%02X): max_sensors_per_node (%zu) exceeded. Increase "
-             "max_sensors_per_node in the gateway config.",
-             name.c_str(), this->name_.c_str(), this->address_, this->max_sensors_);
-    return nullptr;
-  }
-
-  auto *sens = new DynamicSensor(this->name_ + " " + name);
-  App.register_sensor(sens);
-
-  this->sensors_[name] = sens;
-  ESP_LOGD("lora_gateway", "Created new sensor '%s' for node %s (0x%02X)", name.c_str(), this->name_.c_str(),
-           this->address_);
-  return sens;
+sensor::Sensor *RemoteNode::find_sensor(const std::string &key) const {
+  auto it = this->sensors_.find(key);
+  return it == this->sensors_.end() ? nullptr : it->second;
 }
 
-binary_sensor::BinarySensor *RemoteNode::get_or_create_binary_sensor(const std::string &name) {
-  auto it = this->binary_sensors_.find(name);
-  if (it != this->binary_sensors_.end()) {
-    return it->second;
-  }
-
-  if (this->binary_sensors_.size() >= this->max_binary_sensors_) {
-    ESP_LOGE("lora_gateway",
-             "Cannot create binary sensor '%s' for node %s (0x%02X): max_binary_sensors_per_node (%zu) exceeded. "
-             "Increase max_binary_sensors_per_node in the gateway config.",
-             name.c_str(), this->name_.c_str(), this->address_, this->max_binary_sensors_);
-    return nullptr;
-  }
-
-  auto *sens = new DynamicBinarySensor(this->name_ + " " + name);
-  App.register_binary_sensor(sens);
-
-  this->binary_sensors_[name] = sens;
-  ESP_LOGD("lora_gateway", "Created new binary sensor '%s' for node %s (0x%02X)", name.c_str(), this->name_.c_str(),
-           this->address_);
-  return sens;
+binary_sensor::BinarySensor *RemoteNode::find_binary_sensor(const std::string &key) const {
+  auto it = this->binary_sensors_.find(key);
+  return it == this->binary_sensors_.end() ? nullptr : it->second;
 }
 
 // --- LoraGateway implementation ---
@@ -475,11 +438,14 @@ void LoraGateway::process_complete_response_(RemoteNode *node, const std::vector
       std::string name(payload.begin() + offset, payload.begin() + offset + name_len);
       offset += name_len;
 
-      auto *sens = node->get_or_create_sensor(name);
+      auto *sens = node->find_sensor(name);
       if (sens != nullptr) {
         sens->publish_state(value);
         sensor_count++;
         ESP_LOGD(TAG, "  Sensor '%s' = %.2f", name.c_str(), value);
+      } else {
+        ESP_LOGW(TAG, "Unknown sensor key '%s' from node %s (0x%02X); declare it in the gateway config to publish it",
+                 name.c_str(), node->get_name().c_str(), node->get_address());
       }
 
     } else if (key == lora_protocol::BINARY_SENSOR_KEY) {
@@ -504,11 +470,15 @@ void LoraGateway::process_complete_response_(RemoteNode *node, const std::vector
       std::string name(payload.begin() + offset, payload.begin() + offset + name_len);
       offset += name_len;
 
-      auto *sens = node->get_or_create_binary_sensor(name);
+      auto *sens = node->find_binary_sensor(name);
       if (sens != nullptr) {
         sens->publish_state(value);
         binary_sensor_count++;
         ESP_LOGD(TAG, "  Binary Sensor '%s' = %s", name.c_str(), value ? "ON" : "OFF");
+      } else {
+        ESP_LOGW(TAG,
+                 "Unknown binary sensor key '%s' from node %s (0x%02X); declare it in the gateway config to publish it",
+                 name.c_str(), node->get_name().c_str(), node->get_address());
       }
 
     } else {

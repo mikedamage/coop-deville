@@ -8,10 +8,10 @@ substitutions:
   logger_level: DEBUG
   friendly_name: LoRa Gateway
   lora_module_id: sx126x_module
-  lora_pa_power: 10
+  lora_pa_power: "3"
   lora_bandwidth: 125_0kHz
-  lora_frequency: 917500000 # 917.5 MHz
-  lora_spreading_factor: 7
+  lora_frequency: "917500000" # 917.5 MHz
+  lora_spreading_factor: "7"
   lora_coding_rate: CR_4_5
 
 packages:
@@ -67,6 +67,12 @@ lora_gateway:
     - id: test_node_1
       address: 0x02
       name: Test Node 1
+      sensors:
+        - name: "Test Node 1 CPU Temperature"
+          key: "CPU Temperature"
+      binary_sensors:
+        - name: "Test Node 1 LED State"
+          key: "Test LED State"
 
 text_sensor:
   - platform: lora_gateway

@@ -26,7 +26,6 @@ text_sensor:
   - platform: wifi_info
     ip_address:
       name: IP Address
-      update_interval: 180s
     ssid:
       name: Connected SSID
     scan_results:
