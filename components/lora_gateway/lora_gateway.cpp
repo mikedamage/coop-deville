@@ -1,5 +1,7 @@
 #include "lora_gateway.h"
 #include "esphome/core/log.h"
+#include "esphome/core/hal.h"
+#include "esphome/core/helpers.h"
 
 namespace esphome {
 namespace lora_gateway {
@@ -9,6 +11,12 @@ static const char *const TAG = "lora_gateway";
 // --- Auth helpers ---
 
 std::vector<uint8_t> LoraGateway::sign_packet_(std::vector<uint8_t> body) {
+  // Ensure NVS holds a value strictly ahead of the seq we're about to use so reboots don't replay.
+  if (this->tx_seq_ == this->tx_seq_reserved_) {
+    this->tx_seq_reserved_ = this->tx_seq_ + TX_SEQ_RESERVE_CHUNK;
+    this->tx_seq_pref_.save(&this->tx_seq_reserved_);
+  }
+
   // Append sequence number (little-endian)
   uint16_t seq = this->tx_seq_++;
   body.push_back(static_cast<uint8_t>(seq & 0xFF));
@@ -79,6 +87,18 @@ binary_sensor::BinarySensor *RemoteNode::find_binary_sensor(const std::string &k
 
 void LoraGateway::setup() {
   ESP_LOGCONFIG(TAG, "Setting up LoRa Gateway...");
+
+  // Load persisted tx sequence high-water mark so seq remains monotonic across reboots.
+  this->tx_seq_pref_ = global_preferences->make_preference<uint16_t>(fnv1_hash("lora_gateway_tx_seq"));
+  uint16_t saved = 0;
+  if (this->tx_seq_pref_.load(&saved)) {
+    ESP_LOGI(TAG, "Restored tx_seq high-water mark: %u", saved);
+  } else {
+    ESP_LOGI(TAG, "No saved tx_seq found, starting fresh");
+  }
+  this->tx_seq_ = saved;
+  this->tx_seq_reserved_ = saved + TX_SEQ_RESERVE_CHUNK;
+  this->tx_seq_pref_.save(&this->tx_seq_reserved_);
 
   if (this->remote_nodes_.empty()) {
     ESP_LOGW(TAG, "No remote nodes configured");

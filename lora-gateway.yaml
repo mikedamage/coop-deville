@@ -49,6 +49,9 @@ wifi:
     ssid: ${friendly_name} Fallback
     password: !secret hotspot_password
 
+api:
+  reboot_timeout: 0s
+
 web_server:
   port: 80
 

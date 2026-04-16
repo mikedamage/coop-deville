@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "esphome/core/component.h"
+#include "esphome/core/preferences.h"
 #include "esphome/components/sx126x/sx126x.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
@@ -108,6 +109,9 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
   uint8_t address_{0};
   uint8_t auth_key_[lora_protocol::AUTH_KEY_SIZE]{};
   uint16_t tx_seq_{0};
+  uint16_t tx_seq_reserved_{0};
+  ESPPreferenceObject tx_seq_pref_;
+  static constexpr uint16_t TX_SEQ_RESERVE_CHUNK = 256;
   uint32_t response_timeout_ms_{0};
   uint32_t poll_interval_ms_{0};
   uint32_t time_sync_interval_ms_{0};
