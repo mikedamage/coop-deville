@@ -1,6 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import sensor
+from esphome.components.esp32 import include_builtin_idf_component
 from esphome.const import (
     CONF_ID,
     CONF_BATTERY_VOLTAGE,
@@ -32,6 +33,8 @@ CONFIG_SCHEMA = cv.Schema(
 
 
 async def to_code(config):
+    include_builtin_idf_component("esp_adc")
+
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 

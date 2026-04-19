@@ -1,6 +1,11 @@
+#include <cmath>
+
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 #include "heltec_battery_sensor.h"
+
+#include "driver/gpio.h"
+#include "esp_adc/adc_oneshot.h"
 
 #define VBAT_Read 1
 #define ADC_Ctrl 37
@@ -12,14 +17,28 @@ namespace esphome {
 namespace heltec_battery_sensor {
 static const char *TAG = "heltec_battery_sensor.sensor";
 
+static adc_oneshot_unit_handle_t s_adc_handle = nullptr;
+
 void HeltecBatterySensor::setup() {
   // Initialize ADC control pin and battery voltage input pin
   // https://digitalconcepts.net.au/arduino/index.php?op=Battery
-  analogSetAttenuation(ADC_0db);
-  pinMode(ADC_Ctrl, OUTPUT);
-  pinMode(VBAT_Read, INPUT);
-  // adcAttachPin(VBAT_Read);
-  analogReadResolution(ADC_Resolution);  // 12-bit ADC resolution
+  adc_oneshot_unit_init_cfg_t init_cfg = {};
+  init_cfg.unit_id = ADC_UNIT_1;
+  adc_oneshot_new_unit(&init_cfg, &s_adc_handle);
+
+  adc_oneshot_chan_cfg_t chan_cfg = {};
+  chan_cfg.atten = ADC_ATTEN_DB_0;
+  chan_cfg.bitwidth = ADC_BITWIDTH_12;
+  // GPIO1 on ESP32-S3 is ADC1 channel 0
+  adc_oneshot_config_channel(s_adc_handle, ADC_CHANNEL_0, &chan_cfg);
+
+  gpio_config_t io_conf = {};
+  io_conf.pin_bit_mask = 1ULL << ADC_Ctrl;
+  io_conf.mode = GPIO_MODE_OUTPUT;
+  io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+  io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  io_conf.intr_type = GPIO_INTR_DISABLE;
+  gpio_config(&io_conf);
 
   LOG_UPDATE_INTERVAL(this);
   LOG_SENSOR(" ", "Voltage", this->voltage_sensor_);
@@ -36,20 +55,22 @@ float HeltecBatterySensor::read_battery_voltage_() {
   const int R1 = 390.0;
   const int R2 = 100.0;
 
-  digitalWrite(ADC_Ctrl, HIGH);
+  gpio_set_level(static_cast<gpio_num_t>(ADC_Ctrl), 1);
 
   delay_microseconds_safe(1000);
 
   // Quickly take 10 samples for increased accuracy
   for (int i = 0; i < numSamples; i++) {
-    rawValue += analogRead(VBAT_Read);
+    int sample = 0;
+    adc_oneshot_read(s_adc_handle, ADC_CHANNEL_0, &sample);
+    rawValue += sample;
   }
 
   rawValue /= numSamples;  // Average value over numSamples readings
 
   ESP_LOGD(TAG, "'%s' - got rawValue of %d", this->name_.c_str(), rawValue);
 
-  digitalWrite(ADC_Ctrl, LOW);
+  gpio_set_level(static_cast<gpio_num_t>(ADC_Ctrl), 0);
 
   float scale = (adcMaxVoltage / (float) adcMax);
   float voltageDivFactor = (R1 + R2) / (float) R2;

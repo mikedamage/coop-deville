@@ -39,6 +39,12 @@ This is another Heltec WiFi LoRa 32 v3.2 board with no physical connections besi
 
 See below for command examples.
 
+# Python & ESPHome Environment
+
+- Python 3.12.12 is managed via **pyenv** (`.python-version` in repo root). The user's shell initializes pyenv automatically.
+- ESPHome is installed via `pip` under pyenv's 3.12 — do **not** use the homebrew `esphome` or `uv run esphome`. Just run `esphome` directly.
+- The ESP-IDF framework is used for all ESP32-S3 configs (Heltec WiFi LoRa 32 v3). Arduino framework is no longer used.
+
 # Commands
 
 - `scripts/populate-secrets`: loads secrets from a 1Password secure note and writes them to the local @secrets.yaml file. If secrets.yaml exists, it is overwritten.

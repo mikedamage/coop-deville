@@ -24,8 +24,7 @@ esp32:
   cpu_frequency: 160mhz
   flash_size: 8mb
   framework:
-    type: arduino
-    version: "3.3.2"
+    type: esp-idf
 
 logger:
   level: ${logger_level}
@@ -78,6 +77,17 @@ switch:
     pin: GPIO48
 
 binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO0
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "PRG Button"
+    on_press:
+      - switch.toggle: test_led
+
   - platform: template
     name: "Test LED State"
     id: test_led_state
