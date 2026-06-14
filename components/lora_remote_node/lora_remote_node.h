@@ -18,6 +18,22 @@
 namespace esphome {
 namespace lora_remote_node {
 
+// Thin accessor that re-exposes RealTimeClock's protected synchronize_epoch_().
+//
+// Time sources (SNTP, Home Assistant, GPS, ...) all derive from
+// time::RealTimeClock and set the system clock by calling the protected
+// synchronize_epoch_() on themselves. This node only holds a
+// time::RealTimeClock* and is not itself a time source, so it cannot reach that
+// method directly. Because synchronize_epoch_() is a non-virtual member
+// inherited by every RealTimeClock, a derived type that adds no state can be
+// used purely to gain access to it: static_cast a RealTimeClock* to this type
+// and call the public shim. The pointed-to object remains a valid
+// RealTimeClock; this only changes accessibility, not its layout or behavior.
+class RealTimeClockSetter : public time::RealTimeClock {
+ public:
+  void set_epoch(uint32_t epoch) { this->synchronize_epoch_(epoch); }
+};
+
 class LoraRemoteNode : public Component, public sx126x::SX126xListener {
  public:
   void setup() override;
