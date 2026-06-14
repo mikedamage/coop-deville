@@ -163,7 +163,8 @@ bool LoraRemoteNode::is_poll_request_(const std::vector<uint8_t> &packet) {
     return false;
   }
   uint8_t target = packet[lora_protocol::OFFSET_DST_ADDR];
-  return (target == this->address_ || target == lora_protocol::BROADCAST_ADDRESS);
+  // Poll requests are unicast only — reject broadcast (0xFF) per PROTOCOL.md.
+  return (target == this->address_);
 }
 
 bool LoraRemoteNode::is_time_sync_(const std::vector<uint8_t> &packet) {
