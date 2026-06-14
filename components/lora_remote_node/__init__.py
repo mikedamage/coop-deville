@@ -24,6 +24,9 @@ lora_remote_node_ns = cg.esphome_ns.namespace("lora_remote_node")
 LoraRemoteNode = lora_remote_node_ns.class_(
     "LoraRemoteNode", cg.Component, sx126x.SX126xListener
 )
+LoraNodeTime = lora_remote_node_ns.class_(
+    "LoraNodeTime", cg.PollingComponent, time_component.RealTimeClock
+)
 
 
 def validate_address_range(value):
@@ -64,7 +67,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Required(CONF_SX126X_ID): cv.use_id(sx126x.SX126x),
         cv.Required(CONF_ADDRESS): cv.All(cv.hex_uint8_t, validate_address_range),
         cv.Required(CONF_AUTH_KEY): validate_auth_key,
-        cv.Optional(CONF_TIME_ID): cv.use_id(time_component.RealTimeClock),
+        cv.Optional(CONF_TIME_ID): cv.use_id(LoraNodeTime),
         cv.Optional(CONF_LISTEN_WINDOW): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_FULL_UPDATE_INTERVAL, default=10): cv.int_range(min=1, max=255),
         cv.Optional(CONF_SENSORS, default=[]): cv.ensure_list(cv.use_id(sensor.Sensor)),

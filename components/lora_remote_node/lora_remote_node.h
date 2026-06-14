@@ -12,27 +12,12 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/time/real_time_clock.h"
+#include "lora_node_time.h"
 #include "lora_protocol.h"
 #include "siphash.h"
 
 namespace esphome {
 namespace lora_remote_node {
-
-// Thin accessor that re-exposes RealTimeClock's protected synchronize_epoch_().
-//
-// Time sources (SNTP, Home Assistant, GPS, ...) all derive from
-// time::RealTimeClock and set the system clock by calling the protected
-// synchronize_epoch_() on themselves. This node only holds a
-// time::RealTimeClock* and is not itself a time source, so it cannot reach that
-// method directly. Because synchronize_epoch_() is a non-virtual member
-// inherited by every RealTimeClock, a derived type that adds no state can be
-// used purely to gain access to it: static_cast a RealTimeClock* to this type
-// and call the public shim. The pointed-to object remains a valid
-// RealTimeClock; this only changes accessibility, not its layout or behavior.
-class RealTimeClockSetter : public time::RealTimeClock {
- public:
-  void set_epoch(uint32_t epoch) { this->synchronize_epoch_(epoch); }
-};
 
 class LoraRemoteNode : public Component, public sx126x::SX126xListener {
  public:
@@ -46,7 +31,7 @@ class LoraRemoteNode : public Component, public sx126x::SX126xListener {
   void set_auth_key(const std::vector<uint8_t> &key) {
     std::copy_n(key.begin(), std::min(key.size(), (size_t) lora_protocol::AUTH_KEY_SIZE), this->auth_key_);
   }
-  void set_time_source(time::RealTimeClock *time) { this->time_ = time; }
+  void set_time_source(LoraNodeTime *time) { this->time_ = time; }
   void set_listen_window(uint32_t ms) {
     this->guard_window_ms_ = ms;
     this->listen_window_enabled_ = true;
@@ -66,7 +51,7 @@ class LoraRemoteNode : public Component, public sx126x::SX126xListener {
   uint16_t tx_seq_{0};
   uint16_t gw_seq_{0};
   bool gw_seq_initialized_{false};
-  time::RealTimeClock *time_{nullptr};
+  LoraNodeTime *time_{nullptr};
   std::vector<sensor::Sensor *> sensors_;
   std::vector<binary_sensor::BinarySensor *> binary_sensors_;
 
