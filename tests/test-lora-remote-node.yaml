@@ -62,9 +62,11 @@ sx126x:
     tcxo_delay: 5ms
     sync_value: [0x14, 0x24]
 
+# Remote nodes have no reliable internet; their clock is set from the gateway's
+# CMD_TIME_SYNC broadcast via the lora_remote_node time platform.
 time:
-  - platform: sntp
-    id: sntp_time
+  - platform: lora_remote_node
+    id: node_time
     timezone: America/New_York
 
 # Test sensors to be reported via lora_remote_node
@@ -93,7 +95,7 @@ lora_remote_node:
   sx126x_id: ${lora_module_id}
   address: 0x02
   auth_key: "0102030405060708090a0b0c0d0e0f10"
-  time_id: sntp_time
+  time_id: node_time
   listen_window: 50ms
   sensors:
     - test_battery_voltage

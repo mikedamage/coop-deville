@@ -247,9 +247,7 @@ void LoraRemoteNode::handle_time_sync_(const std::vector<uint8_t> &packet) {
   // Apply RTC time sync
   if (this->time_ != nullptr) {
     ESP_LOGI(TAG, "Setting RTC time to %u (seconds since epoch)", timestamp);
-    // synchronize_epoch_() is protected on RealTimeClock; reach it through the
-    // RealTimeClockSetter accessor (see header for why this is safe).
-    static_cast<RealTimeClockSetter *>(this->time_)->set_epoch(timestamp);
+    this->time_->set_epoch(timestamp);
     auto esptime = ESPTime::from_epoch_local(timestamp);
     ESP_LOGD(TAG, "Time sync applied: %04d-%02d-%02d %02d:%02d:%02d", esptime.year, esptime.month, esptime.day_of_month,
              esptime.hour, esptime.minute, esptime.second);
