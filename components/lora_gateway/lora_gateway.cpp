@@ -10,13 +10,13 @@ static const char *const TAG = "lora_gateway";
 
 // --- Auth helpers ---
 
-std::vector<uint8_t> LoraGateway::sign_packet_(std::vector<uint8_t> body) {
+std::vector<uint8_t> LoraGateway::sign_packet_(RemoteNode *node, std::vector<uint8_t> body) {
   // Append boot epoch (little-endian)
   body.push_back(static_cast<uint8_t>(this->boot_epoch_ & 0xFF));
   body.push_back(static_cast<uint8_t>((this->boot_epoch_ >> 8) & 0xFF));
 
-  // Append sequence number (little-endian), then advance it
-  uint16_t seq = this->tx_seq_++;
+  // Append the destination node's per-node sequence number (little-endian)
+  uint16_t seq = node->next_tx_seq();
   body.push_back(static_cast<uint8_t>(seq & 0xFF));
   body.push_back(static_cast<uint8_t>((seq >> 8) & 0xFF));
 
@@ -114,7 +114,6 @@ void LoraGateway::setup() {
   }
   this->boot_epoch_ = static_cast<uint16_t>(saved_epoch + 1);
   this->boot_epoch_pref_.save(&this->boot_epoch_);
-  this->tx_seq_ = 0;
 
   if (this->remote_nodes_.empty()) {
     ESP_LOGW(TAG, "No remote nodes configured");
@@ -160,7 +159,6 @@ void LoraGateway::dump_config() {
   if (this->time_sync_interval_ms_ > 0) {
     ESP_LOGCONFIG(TAG, "  Time Sync Interval: %u ms", this->time_sync_interval_ms_);
   }
-  ESP_LOGCONFIG(TAG, "  Send ACK: %s", this->send_ack_ ? "true" : "false");
   ESP_LOGCONFIG(TAG, "  Stale Sensor Behavior: %s",
                 this->stale_behavior_ == StaleSensorBehavior::KEEP_LAST_VALUE ? "keep" : "invalidate");
   ESP_LOGCONFIG(TAG, "  Auth: SipHash-2-4 (16-byte key)");
@@ -212,14 +210,6 @@ bool LoraGateway::should_start_polling_() {
 void LoraGateway::start_new_cycle_() {
   this->cycle_start_ms_ = millis();
   this->current_poll_index_ = 0;
-
-  // Broadcast time sync at the start of each cycle (if interval elapsed)
-  if (this->time_sync_interval_ms_ > 0 && this->time_ != nullptr) {
-    uint32_t now = millis();
-    if (now - this->last_time_sync_ms_ >= this->time_sync_interval_ms_) {
-      this->broadcast_time_sync_();
-    }
-  }
 }
 
 void LoraGateway::poll_next_node_() {
@@ -241,74 +231,30 @@ void LoraGateway::send_poll_request_(RemoteNode *node) {
   body.push_back(node->get_address());
   body.push_back(lora_protocol::CMD_POLL_REQUEST);
 
-  auto packet = this->sign_packet_(std::move(body));
-  this->sx126x_->transmit_packet(packet);
-  ESP_LOGD(TAG, "Sent poll request to node 0x%02X (%s) [seq=%u]", node->get_address(), node->get_name().c_str(),
-           this->tx_seq_ - 1);
-}
-
-void LoraGateway::send_ack_packet_(RemoteNode *node) {
-  if (!this->send_ack_) {
-    return;
+  // Flags: RESPONSE_ACKED confirms receipt of this node's previous response,
+  // riding the poll it is already awake for (replaces the old ACK frame).
+  uint8_t flags = 0;
+  if (node->get_ack_pending()) {
+    flags |= lora_protocol::POLL_FLAG_RESPONSE_ACKED;
+    node->set_ack_pending(false);
   }
+  // TIME_PRESENT is set only when answering a node's time request (Phase 4).
+  body.push_back(flags);
 
-  std::vector<uint8_t> body;
-  body.push_back(this->address_);
-  body.push_back(node->get_address());
-  body.push_back(lora_protocol::CMD_ACK);
-
-  auto packet = this->sign_packet_(std::move(body));
-  this->sx126x_->transmit_packet(packet);
-  ESP_LOGD(TAG, "Sent ACK to node 0x%02X", node->get_address());
-}
-
-void LoraGateway::broadcast_time_sync_() {
-  if (this->time_ == nullptr) {
-    return;
-  }
-
-  auto now_time = this->time_->now();
-  if (!now_time.is_valid()) {
-    ESP_LOGW(TAG, "Cannot broadcast time sync - time not valid");
-    return;
-  }
-
-  uint32_t timestamp = now_time.timestamp;
-
-  std::vector<uint8_t> body;
-  body.push_back(this->address_);
-  body.push_back(lora_protocol::BROADCAST_ADDRESS);
-  body.push_back(lora_protocol::CMD_TIME_SYNC);
-
-  // Timestamp (4 bytes LE)
-  body.push_back(static_cast<uint8_t>(timestamp & 0xFF));
-  body.push_back(static_cast<uint8_t>((timestamp >> 8) & 0xFF));
-  body.push_back(static_cast<uint8_t>((timestamp >> 16) & 0xFF));
-  body.push_back(static_cast<uint8_t>((timestamp >> 24) & 0xFF));
-
-  // Poll interval (4 bytes LE)
+  // Poll interval (4 bytes LE) — always present so the node can self-anchor its
+  // listen schedule from any single poll it receives.
   body.push_back(static_cast<uint8_t>(this->poll_interval_ms_ & 0xFF));
   body.push_back(static_cast<uint8_t>((this->poll_interval_ms_ >> 8) & 0xFF));
   body.push_back(static_cast<uint8_t>((this->poll_interval_ms_ >> 16) & 0xFF));
   body.push_back(static_cast<uint8_t>((this->poll_interval_ms_ >> 24) & 0xFF));
 
-  // Slot duration (2 bytes LE)
-  body.push_back(static_cast<uint8_t>(this->slot_duration_ms_ & 0xFF));
-  body.push_back(static_cast<uint8_t>((this->slot_duration_ms_ >> 8) & 0xFF));
+  // No time block (TIME_PRESENT unset) and no downlink commands yet.
+  body.push_back(0x00);  // cmd_count
 
-  // Node count
-  body.push_back(static_cast<uint8_t>(this->remote_nodes_.size()));
-
-  // Node addresses in poll order
-  for (auto *node : this->remote_nodes_) {
-    body.push_back(node->get_address());
-  }
-
-  auto packet = this->sign_packet_(std::move(body));
+  auto packet = this->sign_packet_(node, std::move(body));
   this->sx126x_->transmit_packet(packet);
-  this->last_time_sync_ms_ = millis();
-  ESP_LOGD(TAG, "Broadcasted time sync: epoch=%u, poll_interval=%u, slot_duration=%u, nodes=%d", timestamp,
-           this->poll_interval_ms_, this->slot_duration_ms_, this->remote_nodes_.size());
+  ESP_LOGD(TAG, "Sent poll request to node 0x%02X (%s) [flags=0x%02X]", node->get_address(), node->get_name().c_str(),
+           flags);
 }
 
 void LoraGateway::on_packet(const std::vector<uint8_t> &packet, float rssi, float snr) {
@@ -371,9 +317,15 @@ void LoraGateway::handle_poll_response_(const std::vector<uint8_t> &packet, floa
     return;
   }
 
-  // Extract packet number and total packets from the body (before auth footer)
+  // Extract packet number, total packets and response flags (before auth footer)
   uint8_t packet_num = packet[lora_protocol::OFFSET_PACKET_NUM];
   uint8_t total_packets = packet[lora_protocol::OFFSET_TOTAL_PACKETS];
+  uint8_t resp_flags = packet[lora_protocol::OFFSET_RESPONSE_FLAGS];
+
+  if (resp_flags & lora_protocol::RESP_FLAG_TIME_REQUEST) {
+    // Node is requesting a wall-clock update; demand-driven time sync lands in Phase 4.
+    ESP_LOGD(TAG, "Node 0x%02X requested a time update", src_addr);
+  }
 
   ESP_LOGD(TAG, "Received poll response from node 0x%02X (%s), packet %d/%d (RSSI: %.1f, SNR: %.1f)", src_addr,
            node->get_name().c_str(), packet_num == 0 ? 1 : packet_num, total_packets, rssi, snr);
@@ -394,7 +346,7 @@ void LoraGateway::handle_poll_response_(const std::vector<uint8_t> &packet, floa
   if (packet_num == 0 && total_packets == 1) {
     this->waiting_for_response_ = false;
     this->process_complete_response_(node, payload);
-    this->send_ack_packet_(node);
+    node->set_ack_pending(true);  // confirm receipt via RESPONSE_ACKED on the next poll
     this->update_metrics_sensors_();
   } else {
     auto &partial = this->partial_responses_[src_addr];
@@ -427,7 +379,7 @@ void LoraGateway::handle_poll_response_(const std::vector<uint8_t> &packet, floa
       this->partial_responses_.erase(src_addr);
       this->waiting_for_response_ = false;
       this->process_complete_response_(node, complete_payload);
-      this->send_ack_packet_(node);
+      node->set_ack_pending(true);  // confirm receipt via RESPONSE_ACKED on the next poll
       this->update_metrics_sensors_();
 
       ESP_LOGD(TAG, "Multi-packet response complete from node 0x%02X (%d bytes total)", src_addr,

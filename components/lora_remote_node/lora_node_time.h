@@ -5,8 +5,9 @@
 namespace esphome {
 namespace lora_remote_node {
 
-// Time source whose clock is set from the gateway's CMD_TIME_SYNC broadcast
-// rather than polled. Remote nodes have no reliable WiFi/internet, so SNTP and
+// Time source whose clock is set from a wall-clock time block carried in a
+// (unicast) poll request rather than polled. Remote nodes have no reliable
+// WiFi/internet, so SNTP and
 // Home Assistant time platforms are unavailable; this platform lets the node
 // push the gateway-supplied epoch into the system clock using the same
 // self-synchronize pattern the GPS and Home Assistant time platforms use

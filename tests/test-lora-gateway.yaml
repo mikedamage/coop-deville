@@ -76,7 +76,6 @@ lora_gateway:
   poll_interval: 10s
   time_id: sntp_time
   time_sync_interval: 60s
-  send_ack: false
   stale_sensor_behavior: keep
   remote_nodes:
     - id: test_node_1

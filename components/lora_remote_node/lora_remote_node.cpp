@@ -183,64 +183,76 @@ void LoraRemoteNode::on_packet(const std::vector<uint8_t> &packet, float rssi, f
     ESP_LOGD(TAG, "Received poll request from 0x%02X (RSSI: %.1f, SNR: %.1f)", packet[lora_protocol::OFFSET_SRC_ADDR],
              rssi, snr);
     this->handle_poll_request_(packet);
-  } else if (this->is_time_sync_(packet)) {
-    if (!this->check_gw_seq_(epoch, seq)) {
-      ESP_LOGW(TAG, "Time sync replay detected, dropping");
-      return;
-    }
-    ESP_LOGD(TAG, "Received time sync from 0x%02X (RSSI: %.1f, SNR: %.1f)", packet[lora_protocol::OFFSET_SRC_ADDR],
-             rssi, snr);
-    this->handle_time_sync_(packet);
-  } else if (this->is_ack_(packet)) {
-    ESP_LOGD(TAG, "Received ACK from 0x%02X", packet[lora_protocol::OFFSET_SRC_ADDR]);
-    // ACKs are informational only for now; future retry logic will use them
   }
 }
 
 bool LoraRemoteNode::is_poll_request_(const std::vector<uint8_t> &packet) {
-  if (packet.size() < lora_protocol::POLL_REQUEST_SIZE) {
+  if (packet.size() < lora_protocol::POLL_REQUEST_MIN_SIZE) {
     return false;
   }
   if (packet[lora_protocol::OFFSET_COMMAND] != lora_protocol::CMD_POLL_REQUEST) {
     return false;
   }
-  uint8_t target = packet[lora_protocol::OFFSET_DST_ADDR];
-  // Poll requests are unicast only — reject broadcast (0xFF) per PROTOCOL.md.
-  return (target == this->address_);
-}
-
-bool LoraRemoteNode::is_time_sync_(const std::vector<uint8_t> &packet) {
-  // Minimum time sync: header(14) + 0 nodes + auth(4) = 18 bytes
-  if (packet.size() < lora_protocol::TIME_SYNC_HEADER_SIZE + lora_protocol::AUTH_OVERHEAD) {
-    return false;
-  }
-  if (packet[lora_protocol::OFFSET_COMMAND] != lora_protocol::CMD_TIME_SYNC) {
-    return false;
-  }
-  uint8_t target = packet[lora_protocol::OFFSET_DST_ADDR];
-  return (target == lora_protocol::BROADCAST_ADDRESS);
-}
-
-bool LoraRemoteNode::is_ack_(const std::vector<uint8_t> &packet) {
-  if (packet.size() < lora_protocol::ACK_PACKET_SIZE) {
-    return false;
-  }
-  if (packet[lora_protocol::OFFSET_COMMAND] != lora_protocol::CMD_ACK) {
-    return false;
-  }
-  uint8_t target = packet[lora_protocol::OFFSET_DST_ADDR];
-  return (target == this->address_);
+  // Poll requests are unicast only — the destination must be this node (0xFF and
+  // any other address are rejected; there are no broadcast frames).
+  return (packet[lora_protocol::OFFSET_DST_ADDR] == this->address_);
 }
 
 // --- Packet handlers ---
 
+void LoraRemoteNode::apply_time_block_(uint32_t timestamp) {
+  if (this->time_ == nullptr) {
+    ESP_LOGW(TAG, "Poll carried time but no time source is configured");
+    return;
+  }
+  ESP_LOGI(TAG, "Setting RTC time to %u (seconds since epoch)", timestamp);
+  this->time_->set_epoch(timestamp);
+  auto esptime = ESPTime::from_epoch_local(timestamp);
+  ESP_LOGD(TAG, "Time applied: %04d-%02d-%02d %02d:%02d:%02d", esptime.year, esptime.month, esptime.day_of_month,
+           esptime.hour, esptime.minute, esptime.second);
+}
+
 void LoraRemoteNode::handle_poll_request_(const std::vector<uint8_t> &packet) {
   uint8_t gateway_addr = packet[lora_protocol::OFFSET_SRC_ADDR];
-  ESP_LOGD(TAG, "Handling poll request from gateway 0x%02X", gateway_addr);
+  uint8_t flags = packet[lora_protocol::OFFSET_POLL_FLAGS];
+
+  // Poll interval is always present (bytes 4-7, LE) — the node self-anchors its
+  // listen schedule from this.
+  uint32_t poll_interval = static_cast<uint32_t>(packet[lora_protocol::OFFSET_POLL_INTERVAL]) |
+                           (static_cast<uint32_t>(packet[lora_protocol::OFFSET_POLL_INTERVAL + 1]) << 8) |
+                           (static_cast<uint32_t>(packet[lora_protocol::OFFSET_POLL_INTERVAL + 2]) << 16) |
+                           (static_cast<uint32_t>(packet[lora_protocol::OFFSET_POLL_INTERVAL + 3]) << 24);
+  this->poll_interval_ms_ = poll_interval;
+
+  if (flags & lora_protocol::POLL_FLAG_RESPONSE_ACKED) {
+    ESP_LOGD(TAG, "Gateway acknowledged our previous response");
+  }
+
+  // Optional wall-clock time block follows poll_interval when TIME_PRESENT.
+  if (flags & lora_protocol::POLL_FLAG_TIME_PRESENT) {
+    size_t off = lora_protocol::OFFSET_POLL_OPTIONAL;
+    if (packet.size() >= off + lora_protocol::TIME_BLOCK_SIZE + lora_protocol::AUTH_OVERHEAD) {
+      uint32_t timestamp = static_cast<uint32_t>(packet[off]) | (static_cast<uint32_t>(packet[off + 1]) << 8) |
+                           (static_cast<uint32_t>(packet[off + 2]) << 16) |
+                           (static_cast<uint32_t>(packet[off + 3]) << 24);
+      this->apply_time_block_(timestamp);
+    } else {
+      ESP_LOGW(TAG, "Poll claims TIME_PRESENT but is too short for a time block");
+    }
+  }
+
+  ESP_LOGD(TAG, "Handling poll request from gateway 0x%02X (flags=0x%02X, poll_interval=%u ms)", gateway_addr, flags,
+           this->poll_interval_ms_);
 
   // Record timing for listen window prediction
   this->last_poll_received_ms_ = millis();
   this->consecutive_missed_polls_ = 0;
+
+  // First poll learned the schedule: enter windowed mode if enabled.
+  if (this->listen_window_enabled_ && !this->schedule_received_) {
+    this->schedule_received_ = true;
+    ESP_LOGI(TAG, "Schedule acquired from poll; entering windowed listen mode");
+  }
 
   // Determine if this should be a full update
   bool force_full = this->force_next_full_update_;
@@ -278,97 +290,15 @@ void LoraRemoteNode::handle_poll_request_(const std::vector<uint8_t> &packet) {
   }
 }
 
-void LoraRemoteNode::handle_time_sync_(const std::vector<uint8_t> &packet) {
-  // Extract timestamp (4 bytes LE at offset 3)
-  uint32_t timestamp = 0;
-  timestamp |= static_cast<uint32_t>(packet[lora_protocol::OFFSET_TIME_SYNC_TIMESTAMP]);
-  timestamp |= static_cast<uint32_t>(packet[lora_protocol::OFFSET_TIME_SYNC_TIMESTAMP + 1]) << 8;
-  timestamp |= static_cast<uint32_t>(packet[lora_protocol::OFFSET_TIME_SYNC_TIMESTAMP + 2]) << 16;
-  timestamp |= static_cast<uint32_t>(packet[lora_protocol::OFFSET_TIME_SYNC_TIMESTAMP + 3]) << 24;
-
-  // Apply RTC time sync
-  if (this->time_ != nullptr) {
-    ESP_LOGI(TAG, "Setting RTC time to %u (seconds since epoch)", timestamp);
-    this->time_->set_epoch(timestamp);
-    auto esptime = ESPTime::from_epoch_local(timestamp);
-    ESP_LOGD(TAG, "Time sync applied: %04d-%02d-%02d %02d:%02d:%02d", esptime.year, esptime.month, esptime.day_of_month,
-             esptime.hour, esptime.minute, esptime.second);
-  }
-
-  // Extract schedule info
-  uint32_t poll_interval = 0;
-  poll_interval |= static_cast<uint32_t>(packet[lora_protocol::OFFSET_TIME_SYNC_POLL_INTERVAL]);
-  poll_interval |= static_cast<uint32_t>(packet[lora_protocol::OFFSET_TIME_SYNC_POLL_INTERVAL + 1]) << 8;
-  poll_interval |= static_cast<uint32_t>(packet[lora_protocol::OFFSET_TIME_SYNC_POLL_INTERVAL + 2]) << 16;
-  poll_interval |= static_cast<uint32_t>(packet[lora_protocol::OFFSET_TIME_SYNC_POLL_INTERVAL + 3]) << 24;
-
-  uint16_t slot_duration = 0;
-  slot_duration |= static_cast<uint16_t>(packet[lora_protocol::OFFSET_TIME_SYNC_SLOT_DURATION]);
-  slot_duration |= static_cast<uint16_t>(packet[lora_protocol::OFFSET_TIME_SYNC_SLOT_DURATION + 1]) << 8;
-
-  uint8_t node_count = packet[lora_protocol::OFFSET_TIME_SYNC_NODE_COUNT];
-
-  // Validate packet has enough bytes for the node list + auth
-  size_t expected_min = lora_protocol::OFFSET_TIME_SYNC_NODE_LIST + node_count + lora_protocol::AUTH_OVERHEAD;
-  if (packet.size() < expected_min) {
-    ESP_LOGW(TAG, "Time sync packet too short for declared node count %d", node_count);
-    return;
-  }
-
-  // Find our slot index in the schedule
-  bool found = false;
-  for (uint8_t i = 0; i < node_count; i++) {
-    if (packet[lora_protocol::OFFSET_TIME_SYNC_NODE_LIST + i] == this->address_) {
-      this->slot_index_ = i;
-      found = true;
-      break;
-    }
-  }
-
-  if (!found) {
-    ESP_LOGW(TAG, "This node (0x%02X) is not in the gateway's schedule", this->address_);
-    return;
-  }
-
-  this->poll_interval_ms_ = poll_interval;
-  this->slot_duration_ms_ = slot_duration;
-  this->schedule_node_count_ = node_count;
-
-  ESP_LOGI(TAG, "Schedule received: slot_index=%d, slot_duration=%u, poll_interval=%u, nodes=%d", this->slot_index_,
-           this->slot_duration_ms_, this->poll_interval_ms_, this->schedule_node_count_);
-
-  // If this is the first schedule and listen windows are enabled, transition to windowed mode
-  if (this->listen_window_enabled_ && !this->schedule_received_) {
-    this->schedule_received_ = true;
-
-    // Predict when our first poll will arrive after this time sync.
-    // The gateway polls node[i] at (cycle_start + i * slot_duration).
-    // The time sync was sent at the start of the cycle, so our first poll should
-    // arrive approximately (slot_index + 1) * slot_duration from now.
-    // (+1 because the time sync transmission takes ~1 slot worth of time)
-    uint32_t first_poll_offset = (this->slot_index_ + 1) * this->slot_duration_ms_;
-    uint32_t now = millis();
-    this->next_listen_start_ms_ = now + first_poll_offset - this->guard_window_ms_ / 2;
-    this->next_listen_end_ms_ = now + first_poll_offset + this->guard_window_ms_ / 2;
-
-    ESP_LOGI(TAG, "Transitioning to windowed listen mode, first window in %u ms", first_poll_offset);
-    this->sleep_radio_();
-  } else if (this->listen_window_enabled_ && this->schedule_received_) {
-    // Schedule updated — recompute windows if we haven't been polled recently
-    if (this->last_poll_received_ms_ == 0) {
-      uint32_t first_poll_offset = (this->slot_index_ + 1) * this->slot_duration_ms_;
-      uint32_t now = millis();
-      this->next_listen_start_ms_ = now + first_poll_offset - this->guard_window_ms_ / 2;
-      this->next_listen_end_ms_ = now + first_poll_offset + this->guard_window_ms_ / 2;
-    }
-  }
-}
-
 // --- Response building ---
 
 std::vector<std::vector<uint8_t>> LoraRemoteNode::build_response_packets_(uint8_t gateway_addr, bool force_full) {
   std::vector<std::vector<uint8_t>> packets;
   std::vector<uint8_t> payload = this->serialize_sensor_data_(force_full);
+
+  // Response flags (byte 5). TIME_REQUEST (demand-driven time sync) lands in
+  // Phase 4; for now no flags are raised. Identical on every fragment.
+  uint8_t resp_flags = 0;
 
   if (payload.size() <= lora_protocol::MAX_PAYLOAD_SIZE) {
     // Single packet response
@@ -378,6 +308,7 @@ std::vector<std::vector<uint8_t>> LoraRemoteNode::build_response_packets_(uint8_
     body.push_back(lora_protocol::CMD_POLL_RESPONSE);
     body.push_back(0x00);  // Packet number (0 for single)
     body.push_back(0x01);  // Total packets (1)
+    body.push_back(resp_flags);
     body.insert(body.end(), payload.begin(), payload.end());
     packets.push_back(this->sign_packet_(std::move(body)));
   } else {
@@ -395,6 +326,7 @@ std::vector<std::vector<uint8_t>> LoraRemoteNode::build_response_packets_(uint8_
       body.push_back(lora_protocol::CMD_POLL_RESPONSE);
       body.push_back(packet_num);
       body.push_back(total_packets);
+      body.push_back(resp_flags);
       body.insert(body.end(), payload.begin() + offset, payload.begin() + offset + chunk_size);
       packets.push_back(this->sign_packet_(std::move(body)));
 

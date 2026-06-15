@@ -23,7 +23,6 @@ CONF_REMOTE_NODES = "remote_nodes"
 CONF_RESPONSE_TIMEOUT = "response_timeout"
 CONF_POLL_INTERVAL = "poll_interval"
 CONF_TIME_SYNC_INTERVAL = "time_sync_interval"
-CONF_SEND_ACK = "send_ack"
 CONF_STALE_SENSOR_BEHAVIOR = "stale_sensor_behavior"
 
 lora_gateway_ns = cg.esphome_ns.namespace("lora_gateway")
@@ -113,7 +112,6 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_POLL_INTERVAL): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_TIME_ID): cv.use_id(time_component.RealTimeClock),
             cv.Optional(CONF_TIME_SYNC_INTERVAL): cv.positive_time_period_milliseconds,
-            cv.Optional(CONF_SEND_ACK, default=False): cv.boolean,
             cv.Optional(CONF_STALE_SENSOR_BEHAVIOR, default="keep"): cv.enum(
                 STALE_SENSOR_BEHAVIOR_OPTIONS, lower=True
             ),
@@ -134,7 +132,6 @@ async def to_code(config):
     cg.add(var.set_auth_key(config[CONF_AUTH_KEY]))
     cg.add(var.set_response_timeout(config[CONF_RESPONSE_TIMEOUT]))
     cg.add(var.set_poll_interval(config[CONF_POLL_INTERVAL]))
-    cg.add(var.set_send_ack(config[CONF_SEND_ACK]))
     cg.add(var.set_stale_sensor_behavior(config[CONF_STALE_SENSOR_BEHAVIOR]))
 
     if CONF_TIME_ID in config:

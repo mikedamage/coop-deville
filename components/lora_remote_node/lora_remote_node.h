@@ -62,16 +62,14 @@ class LoraRemoteNode : public Component, public sx126x::SX126xListener {
   std::vector<sensor::Sensor *> sensors_;
   std::vector<binary_sensor::BinarySensor *> binary_sensors_;
 
-  // Listen window state
+  // Listen window state. schedule_received_ now means "we have seen at least one
+  // poll and learned poll_interval"; the node self-anchors from each poll it gets.
   bool listen_window_enabled_{false};
   bool schedule_received_{false};
   bool radio_sleeping_{false};
   bool responding_{false};
   uint32_t guard_window_ms_{lora_protocol::DEFAULT_GUARD_WINDOW_MS};
   uint32_t poll_interval_ms_{0};
-  uint32_t slot_duration_ms_{0};
-  uint8_t slot_index_{0};
-  uint8_t schedule_node_count_{0};
   uint32_t last_poll_received_ms_{0};
   uint32_t next_listen_start_ms_{0};
   uint32_t next_listen_end_ms_{0};
@@ -91,12 +89,12 @@ class LoraRemoteNode : public Component, public sx126x::SX126xListener {
 
   // Packet classification
   bool is_poll_request_(const std::vector<uint8_t> &packet);
-  bool is_time_sync_(const std::vector<uint8_t> &packet);
-  bool is_ack_(const std::vector<uint8_t> &packet);
 
   // Packet handlers
   void handle_poll_request_(const std::vector<uint8_t> &packet);
-  void handle_time_sync_(const std::vector<uint8_t> &packet);
+  // Apply a wall-clock time block carried in a poll (TIME_PRESENT). Returns the
+  // offset just past the time block so the caller can continue parsing.
+  void apply_time_block_(uint32_t timestamp);
 
   // Response building
   std::vector<std::vector<uint8_t>> build_response_packets_(uint8_t gateway_addr, bool force_full);

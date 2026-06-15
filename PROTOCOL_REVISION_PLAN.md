@@ -94,6 +94,12 @@ truth; code phases 1–6 implement it):
 
 ---
 
+> **Status:** Phase 1 ✅ and Phase 2 ✅ landed on `feat/protocol-robustness-revision`.
+> The **per-destination gateway seq** moved from Phase 1 to Phase 2: it is
+> gateway-internal and invisible on the wire/to the remote, but incompatible with
+> the (then still-present) broadcast time-sync frame, so it landed alongside
+> broadcast removal. The half-space window covered the shared-counter interim.
+
 ## Phase 1 — Auth core (boot epoch, per-dest seq, window, tag)
 
 **Files:** `components/{lora_gateway,lora_remote_node}/lora_protocol.h`,

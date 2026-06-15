@@ -46,6 +46,14 @@ class RemoteNode {
   bool get_rx_initialized() const { return this->rx_initialized_; }
   void set_rx_initialized(bool v) { this->rx_initialized_ = v; }
 
+  // Per-destination outbound seq so this node sees a dense +1 sequence
+  uint16_t next_tx_seq() { return this->tx_seq_++; }
+
+  // RESPONSE_ACKED: set when this node's last response was fully received,
+  // consumed (and cleared) when its receipt is confirmed in the next poll.
+  bool get_ack_pending() const { return this->ack_pending_; }
+  void set_ack_pending(bool v) { this->ack_pending_ = v; }
+
   void add_sensor(const std::string &key, sensor::Sensor *sens) { this->sensors_[key] = sens; }
   void add_binary_sensor(const std::string &key, binary_sensor::BinarySensor *sens) {
     this->binary_sensors_[key] = sens;
@@ -71,6 +79,10 @@ class RemoteNode {
   uint16_t rx_epoch_{0};
   uint16_t rx_seq_{0};
   bool rx_initialized_{false};
+
+  // Per-node outbound seq (RAM only; paired with the gateway's boot epoch)
+  uint16_t tx_seq_{0};
+  bool ack_pending_{false};
 };
 
 enum class StaleSensorBehavior : uint8_t {
@@ -94,7 +106,6 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
   void set_poll_interval(uint32_t interval_ms) { this->poll_interval_ms_ = interval_ms; }
   void set_time_source(time::RealTimeClock *time) { this->time_ = time; }
   void set_time_sync_interval(uint32_t interval_ms) { this->time_sync_interval_ms_ = interval_ms; }
-  void set_send_ack(bool send_ack) { this->send_ack_ = send_ack; }
   void set_stale_sensor_behavior(StaleSensorBehavior behavior) { this->stale_behavior_ = behavior; }
 
   void add_remote_node(RemoteNode *node) { this->remote_nodes_.push_back(node); }
@@ -112,14 +123,13 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
   uint8_t address_{0};
   uint8_t auth_key_[lora_protocol::AUTH_KEY_SIZE]{};
   // Boot epoch: persisted once per boot and bumped at startup so a rebooted
-  // gateway never reuses a (epoch, seq) pair. seq is RAM-only and resets to 0.
+  // gateway never reuses a (epoch, seq) pair. Per-node seq lives on RemoteNode
+  // and resets to 0 each boot; the fresh epoch makes that safe.
   uint16_t boot_epoch_{0};
-  uint16_t tx_seq_{0};
   ESPPreferenceObject boot_epoch_pref_;
   uint32_t response_timeout_ms_{0};
   uint32_t poll_interval_ms_{0};
   uint32_t time_sync_interval_ms_{0};
-  bool send_ack_{false};
   time::RealTimeClock *time_{nullptr};
   StaleSensorBehavior stale_behavior_{StaleSensorBehavior::KEEP_LAST_VALUE};
 
@@ -140,16 +150,14 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
   text_sensor::TextSensor *last_heard_list_sensor_{nullptr};
   text_sensor::TextSensor *signal_quality_list_sensor_{nullptr};
 
-  // Packet construction with auth
-  std::vector<uint8_t> sign_packet_(std::vector<uint8_t> body);
+  // Packet construction with auth (seq drawn from the destination node)
+  std::vector<uint8_t> sign_packet_(RemoteNode *node, std::vector<uint8_t> body);
   bool verify_packet_(const std::vector<uint8_t> &packet, uint16_t &epoch_out, uint16_t &seq_out);
   bool check_seq_(RemoteNode *node, uint16_t epoch, uint16_t seq);
 
   void start_new_cycle_();
   void poll_next_node_();
   void send_poll_request_(RemoteNode *node);
-  void send_ack_packet_(RemoteNode *node);
-  void broadcast_time_sync_();
   void handle_poll_response_(const std::vector<uint8_t> &packet, float rssi, float snr);
   void process_complete_response_(RemoteNode *node, const std::vector<uint8_t> &payload);
   void handle_timeout_(RemoteNode *node);
