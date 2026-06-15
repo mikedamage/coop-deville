@@ -101,9 +101,9 @@ inline uint64_t siphash_2_4(const uint8_t key[16], const uint8_t *data, size_t l
   return v0 ^ v1 ^ v2 ^ v3;
 }
 
-// Compute a 16-bit truncated authentication tag
-inline uint16_t compute_auth_tag(const uint8_t key[16], const uint8_t *data, size_t len) {
-  return static_cast<uint16_t>(siphash_2_4(key, data, len) & 0xFFFF);
+// Compute a 32-bit truncated authentication tag
+inline uint32_t compute_auth_tag(const uint8_t key[16], const uint8_t *data, size_t len) {
+  return static_cast<uint32_t>(siphash_2_4(key, data, len) & 0xFFFFFFFF);
 }
 
 }  // namespace lora_protocol

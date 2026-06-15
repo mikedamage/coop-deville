@@ -1,5 +1,7 @@
 #include "lora_remote_node.h"
 #include "esphome/core/log.h"
+#include "esphome/core/helpers.h"
+#include "esphome/core/preferences.h"
 
 namespace esphome {
 namespace lora_remote_node {
@@ -9,52 +11,78 @@ static const char *const TAG = "lora_remote_node";
 // --- Auth helpers ---
 
 std::vector<uint8_t> LoraRemoteNode::sign_packet_(std::vector<uint8_t> body) {
+  // Append boot epoch (little-endian)
+  body.push_back(static_cast<uint8_t>(this->boot_epoch_ & 0xFF));
+  body.push_back(static_cast<uint8_t>((this->boot_epoch_ >> 8) & 0xFF));
+
+  // Append sequence number (little-endian), then advance it
   uint16_t seq = this->tx_seq_++;
   body.push_back(static_cast<uint8_t>(seq & 0xFF));
   body.push_back(static_cast<uint8_t>((seq >> 8) & 0xFF));
 
-  uint16_t tag = lora_protocol::compute_auth_tag(this->auth_key_, body.data(), body.size());
+  // Compute 32-bit auth tag over body + epoch + seq, append little-endian
+  uint32_t tag = lora_protocol::compute_auth_tag(this->auth_key_, body.data(), body.size());
   body.push_back(static_cast<uint8_t>(tag & 0xFF));
   body.push_back(static_cast<uint8_t>((tag >> 8) & 0xFF));
+  body.push_back(static_cast<uint8_t>((tag >> 16) & 0xFF));
+  body.push_back(static_cast<uint8_t>((tag >> 24) & 0xFF));
 
   return body;
 }
 
-bool LoraRemoteNode::verify_packet_(const std::vector<uint8_t> &packet, uint16_t &seq_out) {
+bool LoraRemoteNode::verify_packet_(const std::vector<uint8_t> &packet, uint16_t &epoch_out, uint16_t &seq_out) {
   if (packet.size() < lora_protocol::AUTH_OVERHEAD) {
     return false;
   }
 
-  size_t body_plus_seq_len = packet.size() - lora_protocol::AUTH_TAG_SIZE;
-  size_t body_len = packet.size() - lora_protocol::AUTH_OVERHEAD;
+  size_t body_plus_counter_len = packet.size() - lora_protocol::AUTH_TAG_SIZE;
+  size_t counter_off = packet.size() - lora_protocol::AUTH_OVERHEAD;  // start of [epoch][seq]
 
-  seq_out = static_cast<uint16_t>(packet[body_len]) | (static_cast<uint16_t>(packet[body_len + 1]) << 8);
+  epoch_out = static_cast<uint16_t>(packet[counter_off]) | (static_cast<uint16_t>(packet[counter_off + 1]) << 8);
+  seq_out = static_cast<uint16_t>(packet[counter_off + 2]) | (static_cast<uint16_t>(packet[counter_off + 3]) << 8);
 
-  uint16_t received_tag =
-      static_cast<uint16_t>(packet[body_plus_seq_len]) | (static_cast<uint16_t>(packet[body_plus_seq_len + 1]) << 8);
+  uint32_t received_tag = static_cast<uint32_t>(packet[body_plus_counter_len]) |
+                          (static_cast<uint32_t>(packet[body_plus_counter_len + 1]) << 8) |
+                          (static_cast<uint32_t>(packet[body_plus_counter_len + 2]) << 16) |
+                          (static_cast<uint32_t>(packet[body_plus_counter_len + 3]) << 24);
 
-  uint16_t expected_tag = lora_protocol::compute_auth_tag(this->auth_key_, packet.data(), body_plus_seq_len);
+  uint32_t expected_tag = lora_protocol::compute_auth_tag(this->auth_key_, packet.data(), body_plus_counter_len);
 
   return received_tag == expected_tag;
 }
 
-bool LoraRemoteNode::check_gw_seq_(uint16_t seq) {
-  if (!this->gw_seq_initialized_) {
+bool LoraRemoteNode::check_gw_seq_(uint16_t epoch, uint16_t seq) {
+  if (!this->gw_initialized_) {
+    // First packet ever from the gateway — accept and baseline
+    this->gw_epoch_ = epoch;
     this->gw_seq_ = seq;
-    this->gw_seq_initialized_ = true;
-    // New gateway detected — force a full sensor update on next poll
+    this->gw_initialized_ = true;
+    // New gateway session — force a full sensor update on next poll
     this->force_next_full_update_ = true;
     ESP_LOGD(TAG, "New gateway detected, will send full update on next poll");
     return true;
   }
 
-  uint16_t diff = seq - this->gw_seq_;
-  if (diff >= 1 && diff <= lora_protocol::SEQ_WINDOW_SIZE) {
+  if (epoch == this->gw_epoch_) {
+    // Same session: accept a forward seq within the modular half-space
+    if (lora_protocol::is_forward_u16(seq, this->gw_seq_)) {
+      this->gw_seq_ = seq;
+      return true;
+    }
+    ESP_LOGW(TAG, "Replay/stale: epoch %u seq %u not forward of %u", epoch, seq, this->gw_seq_);
+    return false;
+  }
+
+  if (lora_protocol::is_forward_u16(epoch, this->gw_epoch_)) {
+    // Gateway rebooted (newer epoch) — re-baseline and force a full update
+    ESP_LOGI(TAG, "Gateway new epoch %u (was %u); re-baselining", epoch, this->gw_epoch_);
+    this->gw_epoch_ = epoch;
     this->gw_seq_ = seq;
+    this->force_next_full_update_ = true;
     return true;
   }
 
-  ESP_LOGW(TAG, "Gateway sequence rejected: got %u, expected after %u", seq, this->gw_seq_);
+  ESP_LOGW(TAG, "Replay/stale: older gateway epoch %u (current %u)", epoch, this->gw_epoch_);
   return false;
 }
 
@@ -62,6 +90,20 @@ bool LoraRemoteNode::check_gw_seq_(uint16_t seq) {
 
 void LoraRemoteNode::setup() {
   ESP_LOGCONFIG(TAG, "Setting up LoRa Remote Node...");
+
+  // Boot epoch: load, bump once, persist. seq starts at 0 in RAM each boot; the
+  // fresh epoch makes that safe (no per-packet NVS writes, no replay on reboot).
+  this->boot_epoch_pref_ = global_preferences->make_preference<uint16_t>(fnv1_hash("lora_remote_node_boot_epoch"));
+  uint16_t saved_epoch = 0;
+  if (this->boot_epoch_pref_.load(&saved_epoch)) {
+    ESP_LOGI(TAG, "Restored boot epoch: %u", saved_epoch);
+  } else {
+    ESP_LOGI(TAG, "No saved boot epoch found, starting fresh");
+  }
+  this->boot_epoch_ = static_cast<uint16_t>(saved_epoch + 1);
+  this->boot_epoch_pref_.save(&this->boot_epoch_);
+  this->tx_seq_ = 0;
+
   ESP_LOGI(TAG, "Remote node configured at address 0x%02X with %d sensors and %d binary sensors", this->address_,
            this->sensors_.size(), this->binary_sensors_.size());
   if (this->listen_window_enabled_) {
@@ -127,14 +169,14 @@ void LoraRemoteNode::on_packet(const std::vector<uint8_t> &packet, float rssi, f
   }
 
   // Verify auth before any processing
-  uint16_t seq;
-  if (!this->verify_packet_(packet, seq)) {
+  uint16_t epoch, seq;
+  if (!this->verify_packet_(packet, epoch, seq)) {
     ESP_LOGW(TAG, "Received packet with invalid auth tag, dropping");
     return;
   }
 
   if (this->is_poll_request_(packet)) {
-    if (!this->check_gw_seq_(seq)) {
+    if (!this->check_gw_seq_(epoch, seq)) {
       ESP_LOGW(TAG, "Poll request replay detected, dropping");
       return;
     }
@@ -142,7 +184,7 @@ void LoraRemoteNode::on_packet(const std::vector<uint8_t> &packet, float rssi, f
              rssi, snr);
     this->handle_poll_request_(packet);
   } else if (this->is_time_sync_(packet)) {
-    if (!this->check_gw_seq_(seq)) {
+    if (!this->check_gw_seq_(epoch, seq)) {
       ESP_LOGW(TAG, "Time sync replay detected, dropping");
       return;
     }

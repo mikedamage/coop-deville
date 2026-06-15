@@ -20,13 +20,15 @@ static const uint8_t BINARY_SENSOR_KEY = 0x02;
 static const uint8_t BROADCAST_ADDRESS = 0xFF;
 
 // Authentication
-static const size_t AUTH_KEY_SIZE = 16;                            // 128-bit SipHash key
-static const size_t AUTH_TAG_SIZE = 2;                             // 16-bit truncated SipHash tag
-static const size_t SEQ_NUM_SIZE = 2;                              // 16-bit sequence number
-static const size_t AUTH_OVERHEAD = SEQ_NUM_SIZE + AUTH_TAG_SIZE;  // 4 bytes total
+static const size_t AUTH_KEY_SIZE = 16;  // 128-bit SipHash key
+static const size_t EPOCH_SIZE = 2;      // 16-bit boot epoch
+static const size_t SEQ_NUM_SIZE = 2;    // 16-bit sequence number
+static const size_t AUTH_TAG_SIZE = 4;   // 32-bit truncated SipHash tag
+static const size_t AUTH_OVERHEAD =
+    EPOCH_SIZE + SEQ_NUM_SIZE + AUTH_TAG_SIZE;  // 8 bytes total: [epoch:2][seq:2][tag:4]
 
-// Sequence number anti-replay window
-static const uint16_t SEQ_WINDOW_SIZE = 256;
+// Anti-replay acceptance uses the modular forward half-space (is_forward_u16);
+// there is no fixed window-size constant.
 
 // Maximum consecutive missed polls before falling back to continuous RX
 static const uint8_t MAX_MISSED_POLLS = 5;
@@ -34,11 +36,11 @@ static const uint8_t MAX_MISSED_POLLS = 5;
 // Packet structure constants
 static const size_t MAX_PACKET_SIZE = 255;
 static const size_t POLL_RESPONSE_HEADER_SIZE = 5;
-static const size_t MAX_PAYLOAD_SIZE = MAX_PACKET_SIZE - POLL_RESPONSE_HEADER_SIZE - AUTH_OVERHEAD;  // 246 bytes
+static const size_t MAX_PAYLOAD_SIZE = MAX_PACKET_SIZE - POLL_RESPONSE_HEADER_SIZE - AUTH_OVERHEAD;  // 242 bytes
 
-// Authenticated packet sizes (body + seq + tag)
-static const size_t POLL_REQUEST_SIZE = 3 + AUTH_OVERHEAD;  // 7 bytes
-static const size_t ACK_PACKET_SIZE = 3 + AUTH_OVERHEAD;    // 7 bytes
+// Authenticated packet sizes (body + epoch + seq + tag)
+static const size_t POLL_REQUEST_SIZE = 3 + AUTH_OVERHEAD;  // 11 bytes
+static const size_t ACK_PACKET_SIZE = 3 + AUTH_OVERHEAD;    // 11 bytes
 
 // Packet structure offsets (common header)
 static const size_t OFFSET_SRC_ADDR = 0;

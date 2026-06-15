@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "esphome/core/component.h"
+#include "esphome/core/preferences.h"
 #include "esphome/components/sx126x/sx126x.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
@@ -48,9 +49,15 @@ class LoraRemoteNode : public Component, public sx126x::SX126xListener {
   sx126x::SX126x *sx126x_{nullptr};
   uint8_t address_{0};
   uint8_t auth_key_[lora_protocol::AUTH_KEY_SIZE]{};
+  // Boot epoch: persisted once per boot and bumped at startup so a rebooted node
+  // never reuses a (epoch, seq) pair. seq is RAM-only and resets to 0.
+  uint16_t boot_epoch_{0};
   uint16_t tx_seq_{0};
+  ESPPreferenceObject boot_epoch_pref_;
+  // Inbound (epoch, seq) tracking for the gateway, for anti-replay
+  uint16_t gw_epoch_{0};
   uint16_t gw_seq_{0};
-  bool gw_seq_initialized_{false};
+  bool gw_initialized_{false};
   LoraNodeTime *time_{nullptr};
   std::vector<sensor::Sensor *> sensors_;
   std::vector<binary_sensor::BinarySensor *> binary_sensors_;
@@ -79,8 +86,8 @@ class LoraRemoteNode : public Component, public sx126x::SX126xListener {
 
   // Auth helpers
   std::vector<uint8_t> sign_packet_(std::vector<uint8_t> body);
-  bool verify_packet_(const std::vector<uint8_t> &packet, uint16_t &seq_out);
-  bool check_gw_seq_(uint16_t seq);
+  bool verify_packet_(const std::vector<uint8_t> &packet, uint16_t &epoch_out, uint16_t &seq_out);
+  bool check_gw_seq_(uint16_t epoch, uint16_t seq);
 
   // Packet classification
   bool is_poll_request_(const std::vector<uint8_t> &packet);

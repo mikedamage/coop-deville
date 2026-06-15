@@ -39,10 +39,12 @@ class RemoteNode {
 
   RemoteNodeMetrics &get_metrics() { return this->metrics_; }
 
+  uint16_t get_rx_epoch() const { return this->rx_epoch_; }
+  void set_rx_epoch(uint16_t epoch) { this->rx_epoch_ = epoch; }
   uint16_t get_rx_seq() const { return this->rx_seq_; }
   void set_rx_seq(uint16_t seq) { this->rx_seq_ = seq; }
-  bool get_rx_seq_initialized() const { return this->rx_seq_initialized_; }
-  void set_rx_seq_initialized(bool v) { this->rx_seq_initialized_ = v; }
+  bool get_rx_initialized() const { return this->rx_initialized_; }
+  void set_rx_initialized(bool v) { this->rx_initialized_ = v; }
 
   void add_sensor(const std::string &key, sensor::Sensor *sens) { this->sensors_[key] = sens; }
   void add_binary_sensor(const std::string &key, binary_sensor::BinarySensor *sens) {
@@ -65,9 +67,10 @@ class RemoteNode {
   std::map<std::string, sensor::Sensor *> sensors_;
   std::map<std::string, binary_sensor::BinarySensor *> binary_sensors_;
 
-  // Per-node inbound sequence tracking for anti-replay
+  // Per-node inbound (epoch, seq) tracking for anti-replay
+  uint16_t rx_epoch_{0};
   uint16_t rx_seq_{0};
-  bool rx_seq_initialized_{false};
+  bool rx_initialized_{false};
 };
 
 enum class StaleSensorBehavior : uint8_t {
@@ -108,10 +111,11 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
   sx126x::SX126x *sx126x_{nullptr};
   uint8_t address_{0};
   uint8_t auth_key_[lora_protocol::AUTH_KEY_SIZE]{};
+  // Boot epoch: persisted once per boot and bumped at startup so a rebooted
+  // gateway never reuses a (epoch, seq) pair. seq is RAM-only and resets to 0.
+  uint16_t boot_epoch_{0};
   uint16_t tx_seq_{0};
-  uint16_t tx_seq_reserved_{0};
-  ESPPreferenceObject tx_seq_pref_;
-  static constexpr uint16_t TX_SEQ_RESERVE_CHUNK = 256;
+  ESPPreferenceObject boot_epoch_pref_;
   uint32_t response_timeout_ms_{0};
   uint32_t poll_interval_ms_{0};
   uint32_t time_sync_interval_ms_{0};
@@ -138,8 +142,8 @@ class LoraGateway : public Component, public sx126x::SX126xListener {
 
   // Packet construction with auth
   std::vector<uint8_t> sign_packet_(std::vector<uint8_t> body);
-  bool verify_packet_(const std::vector<uint8_t> &packet, uint16_t &seq_out);
-  bool check_seq_(RemoteNode *node, uint16_t seq);
+  bool verify_packet_(const std::vector<uint8_t> &packet, uint16_t &epoch_out, uint16_t &seq_out);
+  bool check_seq_(RemoteNode *node, uint16_t epoch, uint16_t seq);
 
   void start_new_cycle_();
   void poll_next_node_();

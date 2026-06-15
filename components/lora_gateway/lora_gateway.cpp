@@ -11,63 +11,78 @@ static const char *const TAG = "lora_gateway";
 // --- Auth helpers ---
 
 std::vector<uint8_t> LoraGateway::sign_packet_(std::vector<uint8_t> body) {
-  // Ensure NVS holds a value strictly ahead of the seq we're about to use so reboots don't replay.
-  if (this->tx_seq_ == this->tx_seq_reserved_) {
-    this->tx_seq_reserved_ = this->tx_seq_ + TX_SEQ_RESERVE_CHUNK;
-    this->tx_seq_pref_.save(&this->tx_seq_reserved_);
-  }
+  // Append boot epoch (little-endian)
+  body.push_back(static_cast<uint8_t>(this->boot_epoch_ & 0xFF));
+  body.push_back(static_cast<uint8_t>((this->boot_epoch_ >> 8) & 0xFF));
 
-  // Append sequence number (little-endian)
+  // Append sequence number (little-endian), then advance it
   uint16_t seq = this->tx_seq_++;
   body.push_back(static_cast<uint8_t>(seq & 0xFF));
   body.push_back(static_cast<uint8_t>((seq >> 8) & 0xFF));
 
-  // Compute auth tag over body + seq
-  uint16_t tag = lora_protocol::compute_auth_tag(this->auth_key_, body.data(), body.size());
+  // Compute 32-bit auth tag over body + epoch + seq, append little-endian
+  uint32_t tag = lora_protocol::compute_auth_tag(this->auth_key_, body.data(), body.size());
   body.push_back(static_cast<uint8_t>(tag & 0xFF));
   body.push_back(static_cast<uint8_t>((tag >> 8) & 0xFF));
+  body.push_back(static_cast<uint8_t>((tag >> 16) & 0xFF));
+  body.push_back(static_cast<uint8_t>((tag >> 24) & 0xFF));
 
   return body;
 }
 
-bool LoraGateway::verify_packet_(const std::vector<uint8_t> &packet, uint16_t &seq_out) {
+bool LoraGateway::verify_packet_(const std::vector<uint8_t> &packet, uint16_t &epoch_out, uint16_t &seq_out) {
   if (packet.size() < lora_protocol::AUTH_OVERHEAD) {
     return false;
   }
 
-  size_t body_plus_seq_len = packet.size() - lora_protocol::AUTH_TAG_SIZE;
-  size_t body_len = packet.size() - lora_protocol::AUTH_OVERHEAD;
+  size_t body_plus_counter_len = packet.size() - lora_protocol::AUTH_TAG_SIZE;
+  size_t counter_off = packet.size() - lora_protocol::AUTH_OVERHEAD;  // start of [epoch][seq]
 
-  // Extract sequence number
-  seq_out = static_cast<uint16_t>(packet[body_len]) | (static_cast<uint16_t>(packet[body_len + 1]) << 8);
+  // Extract epoch and seq from the 4 bytes before the tag
+  epoch_out = static_cast<uint16_t>(packet[counter_off]) | (static_cast<uint16_t>(packet[counter_off + 1]) << 8);
+  seq_out = static_cast<uint16_t>(packet[counter_off + 2]) | (static_cast<uint16_t>(packet[counter_off + 3]) << 8);
 
-  // Extract received tag
-  uint16_t received_tag =
-      static_cast<uint16_t>(packet[body_plus_seq_len]) | (static_cast<uint16_t>(packet[body_plus_seq_len + 1]) << 8);
+  // Extract received 32-bit tag (little-endian)
+  uint32_t received_tag = static_cast<uint32_t>(packet[body_plus_counter_len]) |
+                          (static_cast<uint32_t>(packet[body_plus_counter_len + 1]) << 8) |
+                          (static_cast<uint32_t>(packet[body_plus_counter_len + 2]) << 16) |
+                          (static_cast<uint32_t>(packet[body_plus_counter_len + 3]) << 24);
 
-  // Compute expected tag over body + seq (everything except the tag itself)
-  uint16_t expected_tag = lora_protocol::compute_auth_tag(this->auth_key_, packet.data(), body_plus_seq_len);
+  // Compute expected tag over body + epoch + seq (everything except the tag itself)
+  uint32_t expected_tag = lora_protocol::compute_auth_tag(this->auth_key_, packet.data(), body_plus_counter_len);
 
   return received_tag == expected_tag;
 }
 
-bool LoraGateway::check_seq_(RemoteNode *node, uint16_t seq) {
-  if (!node->get_rx_seq_initialized()) {
-    // First packet from this node — accept and initialize
+bool LoraGateway::check_seq_(RemoteNode *node, uint16_t epoch, uint16_t seq) {
+  if (!node->get_rx_initialized()) {
+    // First packet ever from this node — accept and baseline
+    node->set_rx_epoch(epoch);
     node->set_rx_seq(seq);
-    node->set_rx_seq_initialized(true);
+    node->set_rx_initialized(true);
     return true;
   }
 
-  uint16_t last = node->get_rx_seq();
-  // Accept if seq is within [last+1, last+WINDOW_SIZE] (modular arithmetic)
-  uint16_t diff = seq - last;  // wraps correctly for uint16_t
-  if (diff >= 1 && diff <= lora_protocol::SEQ_WINDOW_SIZE) {
+  uint16_t last_epoch = node->get_rx_epoch();
+  if (epoch == last_epoch) {
+    // Same session: accept a forward seq within the modular half-space
+    if (lora_protocol::is_forward_u16(seq, node->get_rx_seq())) {
+      node->set_rx_seq(seq);
+      return true;
+    }
+    ESP_LOGW(TAG, "Replay/stale: epoch %u seq %u not forward of %u", epoch, seq, node->get_rx_seq());
+    return false;
+  }
+
+  if (lora_protocol::is_forward_u16(epoch, last_epoch)) {
+    // Newer session (node rebooted): re-baseline to this packet
+    ESP_LOGI(TAG, "Node 0x%02X new epoch %u (was %u); re-baselining", node->get_address(), epoch, last_epoch);
+    node->set_rx_epoch(epoch);
     node->set_rx_seq(seq);
     return true;
   }
 
-  ESP_LOGW(TAG, "Sequence number rejected: got %u, expected after %u", seq, last);
+  ESP_LOGW(TAG, "Replay/stale: older epoch %u (current %u)", epoch, last_epoch);
   return false;
 }
 
@@ -88,17 +103,18 @@ binary_sensor::BinarySensor *RemoteNode::find_binary_sensor(const std::string &k
 void LoraGateway::setup() {
   ESP_LOGCONFIG(TAG, "Setting up LoRa Gateway...");
 
-  // Load persisted tx sequence high-water mark so seq remains monotonic across reboots.
-  this->tx_seq_pref_ = global_preferences->make_preference<uint16_t>(fnv1_hash("lora_gateway_tx_seq"));
-  uint16_t saved = 0;
-  if (this->tx_seq_pref_.load(&saved)) {
-    ESP_LOGI(TAG, "Restored tx_seq high-water mark: %u", saved);
+  // Boot epoch: load, bump once, persist. seq starts at 0 in RAM each boot; the
+  // fresh epoch makes that safe (no per-packet NVS writes, no replay on reboot).
+  this->boot_epoch_pref_ = global_preferences->make_preference<uint16_t>(fnv1_hash("lora_gateway_boot_epoch"));
+  uint16_t saved_epoch = 0;
+  if (this->boot_epoch_pref_.load(&saved_epoch)) {
+    ESP_LOGI(TAG, "Restored boot epoch: %u", saved_epoch);
   } else {
-    ESP_LOGI(TAG, "No saved tx_seq found, starting fresh");
+    ESP_LOGI(TAG, "No saved boot epoch found, starting fresh");
   }
-  this->tx_seq_ = saved;
-  this->tx_seq_reserved_ = saved + TX_SEQ_RESERVE_CHUNK;
-  this->tx_seq_pref_.save(&this->tx_seq_reserved_);
+  this->boot_epoch_ = static_cast<uint16_t>(saved_epoch + 1);
+  this->boot_epoch_pref_.save(&this->boot_epoch_);
+  this->tx_seq_ = 0;
 
   if (this->remote_nodes_.empty()) {
     ESP_LOGW(TAG, "No remote nodes configured");
@@ -296,7 +312,7 @@ void LoraGateway::broadcast_time_sync_() {
 }
 
 void LoraGateway::on_packet(const std::vector<uint8_t> &packet, float rssi, float snr) {
-  // Minimum size: header (5) + auth overhead (4) = 9 bytes
+  // Minimum size: poll-response header (5) + auth overhead (8) = 13 bytes
   if (packet.size() < lora_protocol::POLL_RESPONSE_HEADER_SIZE + lora_protocol::AUTH_OVERHEAD) {
     ESP_LOGD(TAG, "Received packet too small (%d bytes), ignoring", packet.size());
     return;
@@ -316,8 +332,8 @@ void LoraGateway::on_packet(const std::vector<uint8_t> &packet, float rssi, floa
   }
 
   // Verify authentication
-  uint16_t seq;
-  if (!this->verify_packet_(packet, seq)) {
+  uint16_t epoch, seq;
+  if (!this->verify_packet_(packet, epoch, seq)) {
     ESP_LOGW(TAG, "Received packet with invalid auth tag, dropping");
     return;
   }
@@ -345,13 +361,12 @@ void LoraGateway::handle_poll_response_(const std::vector<uint8_t> &packet, floa
     return;
   }
 
-  // Check sequence number (extract from verified packet)
-  uint16_t seq;
-  // Re-extract seq (we already verified the packet)
-  size_t body_len = packet.size() - lora_protocol::AUTH_OVERHEAD;
-  seq = static_cast<uint16_t>(packet[body_len]) | (static_cast<uint16_t>(packet[body_len + 1]) << 8);
+  // Re-extract (epoch, seq) from the verified packet for the anti-replay check.
+  size_t counter_off = packet.size() - lora_protocol::AUTH_OVERHEAD;
+  uint16_t epoch = static_cast<uint16_t>(packet[counter_off]) | (static_cast<uint16_t>(packet[counter_off + 1]) << 8);
+  uint16_t seq = static_cast<uint16_t>(packet[counter_off + 2]) | (static_cast<uint16_t>(packet[counter_off + 3]) << 8);
 
-  if (!this->check_seq_(node, seq)) {
+  if (!this->check_seq_(node, epoch, seq)) {
     ESP_LOGW(TAG, "Replay detected from node 0x%02X, dropping", src_addr);
     return;
   }
