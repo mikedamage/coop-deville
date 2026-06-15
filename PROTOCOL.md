@@ -285,7 +285,7 @@ Byte 0:    0x04 (SCHEMA_FINGERPRINT_KEY)
 Bytes 1-2: Fingerprint (uint16_t LE)
 ```
 
-Because index binding is positional, a mismatch between the gateway's and remote's declaration order (or names) would silently publish values to the wrong entities. To catch this, a node **may** emit a single schema-fingerprint record. The fingerprint is the low 16 bits of SipHash-2-4 (using the shared auth key) over the node's ordered manifest: for each declared sensor, then each declared binary sensor, append `[id_len:1][id:N]`, where `id` is the entity's ESPHome `name` on the remote — equal by convention to the gateway's `key`.
+Because index binding is positional, a mismatch between the gateway's and remote's declaration order (or object_ids) would silently publish values to the wrong entities. To catch this, a node **may** emit a single schema-fingerprint record. The fingerprint is the low 16 bits of SipHash-2-4 (using the shared auth key) over the node's ordered manifest: for each declared sensor, then each declared binary sensor, append `[id_len:1][id:N]`, where `id` is the entity's `object_id` on the remote (`get_object_id()`) — equal by convention to the gateway's declared `object_id` for the same entity.
 
 The gateway computes the expected fingerprint from its own declarations for that node. On mismatch it logs a configuration error and **drops the sensor data** (command acks are still processed); a matching or absent fingerprint passes. If present, this record appears immediately after any command-ack records and before the first sensor/binary record.
 
@@ -376,7 +376,7 @@ Queue properties:
 | Persistence | None — queues live in RAM and are lost on gateway reboot |
 | Drain rate | Up to `MAX_COMMANDS_PER_POLL` per poll, bounded also by packet size |
 
-**Coalescing**: when a submitted command's `(opcode, target_name)` matches an entry already in the queue *and* the opcode is declared coalescing, the existing entry's payload is updated in place (queue position preserved). This keeps idempotent state-setters from stacking up behind a disconnected node — only the latest desired state survives. Non-coalescing opcodes always append.
+**Coalescing**: when a submitted command's `(opcode, target_object_id)` matches an entry already in the queue *and* the opcode is declared coalescing, the existing entry's payload is updated in place (queue position preserved). This keeps idempotent state-setters from stacking up behind a disconnected node — only the latest desired state survives. Non-coalescing opcodes always append.
 
 ### Command Envelope
 
@@ -398,13 +398,13 @@ Envelopes are packed back-to-back after the `cmd_count` byte in a poll request. 
 | Value | Name | Payload | Coalescing | Description |
 |-------|------|---------|------------|-------------|
 | `0x00` | reserved | — | — | — |
-| `0x01` | `OP_SET_NUMBER` | `[name_len:1][name:N][value:float32 LE]` | Yes | Set a numeric entity (number/input) by ESPHome name |
-| `0x02` | `OP_SET_SWITCH` | `[name_len:1][name:N][value:uint8]` | Yes | Set a switch entity: `0x00` off, `0x01` on |
-| `0x03` | `OP_INVOKE` | `[name_len:1][name:N]` | No | Trigger a button/action entity (one press per enqueue) |
+| `0x01` | `OP_SET_NUMBER` | `[object_id_len:1][object_id:N][value:float32 LE]` | Yes | Set a numeric entity (number/input) by object_id |
+| `0x02` | `OP_SET_SWITCH` | `[object_id_len:1][object_id:N][value:uint8]` | Yes | Set a switch entity: `0x00` off, `0x01` on |
+| `0x03` | `OP_INVOKE` | `[object_id_len:1][object_id:N]` | No | Trigger a button/action entity (one press per enqueue) |
 | `0x04`–`0x7F` | reserved | — | — | Future standard opcodes |
 | `0x80`–`0xFF` | user | — | declared at reg. | Application-specific commands |
 
-All current standard opcodes address entities by ESPHome `name`. Note this differs from the index-based identification used for **sensor reporting** (see *Sensor Data Payload Format*): commandable entities (numbers, switches, buttons) are a separate, potentially sparser set than reported sensors and are not currently declared in an ordered list on the gateway, so commands carry the name inline. `name_len` is a single byte (max 255 chars), though practical names are much shorter. *(A future revision may give commandable entities their own index space if airtime on the downlink ever warrants it.)*
+All current standard opcodes address entities by their ESPHome `object_id` — the sanitized slug returned by `get_object_id()` (lowercase, underscore-separated, derived from the entity's `name:`), **not** the compile-time `id:` C++ identifier (which has no runtime string form) and **not** the friendly `name:` (which may carry spaces, capitals, or UTF-8). The remote resolves a command by matching its `object_id` against each commandable entity's `get_object_id()`. Note this differs from the index-based identification used for **sensor reporting** (see *Sensor Data Payload Format*): commandable entities (numbers, switches, buttons) are a separate, potentially sparser set than reported sensors and are not currently declared in an ordered list on the gateway, so commands carry the object_id inline. `object_id_len` is a single byte (max 255 chars), though practical object_ids are much shorter. *(A future revision may give commandable entities their own index space if airtime on the downlink ever warrants it.)*
 
 ### Delivery Guarantees
 
