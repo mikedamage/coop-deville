@@ -166,26 +166,37 @@ ACKs are authenticated (SipHash tag verified) but do **not** advance the remote'
 
 ## Sensor Data Payload Format
 
-Sensor data is serialized as a sequence of tagged values. The sensor's ESPHome `name` is transmitted on the wire as the identifier; the gateway resolves each incoming name by matching it against the `key` config field declared for that remote node. **The remote's sensor name must equal the gateway's `key` value** — otherwise the gateway logs an "Unknown sensor key" warning and drops the value.
+Sensor data is serialized as a sequence of tagged records. Each sensor value is identified on the wire by a **1-byte index**, not by name — the index is the 0-based position of the sensor in the node's declared entity list. Because the gateway already declares every remote node's sensors (it must, to register them with Home Assistant at boot) and the remote declares the same sensors in the same order, both sides share an identical index→sensor mapping with no per-value name overhead on the air.
 
-Values are serialized as:
+**Index binding is positional.** Float sensors and binary sensors occupy **separate** index spaces (the record's type tag disambiguates them): the *i*-th declared `sensors:` entry is float index *i*, and the *i*-th declared `binary_sensors:` entry is binary index *i*, on both gateway and remote. The remote's declaration order **must** match the gateway's, or values will be published to the wrong entities. The ESPHome `name`↔`key` convention is retained as the human-facing declaration contract and as the basis for the optional *Schema Fingerprint* (below); names themselves no longer travel on the wire.
 
-### Float Sensor
+Records are serialized as:
 
-```
-Byte 0:       0x01 (SENSOR_KEY)
-Bytes 1-4:    Float value (IEEE 754, 4 bytes)
-Byte 5:       Name length (uint8_t)
-Bytes 6+:     Name string (UTF-8, length bytes)
-```
-
-### Binary Sensor
+### Schema Fingerprint (optional)
 
 ```
-Byte 0:       0x02 (BINARY_SENSOR_KEY)
-Byte 1:       Boolean value (0x00 = false, 0x01 = true)
-Byte 2:       Name length (uint8_t)
-Bytes 3+:     Name string (UTF-8, length bytes)
+Byte 0:    0x04 (SCHEMA_FINGERPRINT_KEY)
+Bytes 1-2: Fingerprint (uint16_t LE)
+```
+
+Because index binding is positional, a mismatch between the gateway's and remote's declaration order (or names) would silently publish values to the wrong entities. To catch this, a node **may** emit a single schema-fingerprint record. The fingerprint is the low 16 bits of SipHash-2-4 (using the shared auth key) over the node's ordered manifest: for each declared sensor, then each declared binary sensor, append `[id_len:1][id:N]`, where `id` is the entity's ESPHome `name` on the remote — equal by convention to the gateway's `key`.
+
+The gateway computes the expected fingerprint from its own declarations for that node. On mismatch it logs a configuration error and **drops the sensor data** (command acks are still processed); a matching or absent fingerprint passes. If present, this record appears immediately after any command-ack records and before the first sensor/binary record.
+
+### Float Sensor (6 bytes)
+
+```
+Byte 0:    0x01 (SENSOR_KEY)
+Byte 1:    Sensor index (uint8_t, 0-based position in the declared `sensors:` list)
+Bytes 2-5: Float value (IEEE 754, 4 bytes LE)
+```
+
+### Binary Sensor (3 bytes)
+
+```
+Byte 0: 0x02 (BINARY_SENSOR_KEY)
+Byte 1: Sensor index (uint8_t, 0-based position in the declared `binary_sensors:` list)
+Byte 2: Boolean value (0x00 = false, 0x01 = true)
 ```
 
 ### Command Ack
@@ -223,22 +234,17 @@ If serialized sensor data exceeds 246 bytes, it is split across multiple respons
 
 The gateway reassembles fragments by source address, concatenating payloads in order. Incomplete assemblies are discarded on timeout.
 
-### Delta Compression
+### Full Snapshot Updates
 
-To reduce airtime, remote nodes only transmit sensor values that have **changed since the last poll response**. The gateway treats any sensors absent from a response as "unchanged" and keeps their last published state.
+Every poll response carries a **complete snapshot** of all sensors that currently have a valid state — there is no per-value change tracking or delta encoding. Index-based identification (above) makes a full snapshot cheap: a float record is 6 bytes and a binary record 3 bytes, so even a sensor-rich node fits a full update in a single packet at typical counts.
 
-- The remote node caches the last-sent value for each sensor (raw float bytes for sensors, bool for binary sensors)
-- On each poll, only sensors whose current value differs from the cached value are serialized
-- If nothing changed, an empty payload is sent (the gateway still receives RSSI/SNR/liveness metrics)
-- Every `full_update_interval` polls (default: 10), a **full update** is forced containing all sensor values regardless of change, to resync state after gateway restarts or missed responses
-- The first poll is always a full update
-- When a new gateway is detected (sequence number initialization), the next poll forces a full update
+Sending a full snapshot every poll (rather than only changed values) is a deliberate tradeoff:
 
-**Value comparison**:
-- Float sensors: `memcmp` on the 4 raw IEEE 754 bytes (handles NaN, -0.0; ADC noise filtering should be done via ESPHome sensor `filters:`)
-- Binary sensors: direct `==` comparison
+- **No stale-on-loss hazard.** A dropped response costs one poll of latency, not up to *N* polls. This matters most for binary sensors (door, water-level alarm, relay-tripped), where a stale value is a real fault and packet loss is the *expected* condition on a long-range 915 MHz link — not an edge case.
+- **No cache state.** The remote keeps no last-sent cache and the gateway needs no resync logic; every response is self-contained and idempotent.
+- **Marginal airtime cost.** With names off the wire, the airtime saved by suppressing unchanged values is small — small payloads often fall in the same LoRa symbol bucket either way, and the preamble/header floor dominates. Continuously-varying analog sensors (battery voltage, charge/load current) change nearly every poll and would be transmitted regardless, so delta encoding would mostly skip only the rarely-changing binaries — exactly the values whose staleness is most costly.
 
-**Configuration**: `full_update_interval` (optional, default 10, range 1-255). Setting to 1 effectively disables delta compression.
+A node with no sensors in a valid state sends an empty payload; the gateway still records liveness/RSSI/SNR from the packet itself.
 
 ## Downlink Commands
 
@@ -292,7 +298,7 @@ Envelopes are packed back-to-back after the `cmd_count` byte in a poll request. 
 | `0x04`–`0x7F` | reserved | — | — | Future standard opcodes |
 | `0x80`–`0xFF` | user | — | declared at reg. | Application-specific commands |
 
-All current standard opcodes address entities by ESPHome `name`, matching the same name↔key convention used for sensor data (see *Sensor Data Payload Format*). `name_len` is a single byte (max 255 chars), though practical names are much shorter.
+All current standard opcodes address entities by ESPHome `name`. Note this differs from the index-based identification used for **sensor reporting** (see *Sensor Data Payload Format*): commandable entities (numbers, switches, buttons) are a separate, potentially sparser set than reported sensors and are not currently declared in an ordered list on the gateway, so commands carry the name inline. `name_len` is a single byte (max 255 chars), though practical names are much shorter. *(A future revision may give commandable entities their own index space if airtime on the downlink ever warrants it.)*
 
 ### Delivery Guarantees
 
@@ -451,9 +457,8 @@ After **5 consecutive missed polls** (`MAX_MISSED_POLLS`), the node falls back t
 | `auth_key` | string | Yes | — | 16-byte key (hex or base64) |
 | `time_id` | ID | No | — | RealTimeClock for time sync |
 | `listen_window` | time | No | disabled | Guard window duration (enables power saving) |
-| `full_update_interval` | int | No | `10` | Polls between forced full updates (1-255) |
-| `sensors` | list | No | `[]` | Sensor IDs to report |
-| `binary_sensors` | list | No | `[]` | Binary sensor IDs to report |
+| `sensors` | list | No | `[]` | Sensor IDs to report (declaration order defines float index) |
+| `binary_sensors` | list | No | `[]` | Binary sensor IDs to report (declaration order defines binary index) |
 
 ## Protocol Constants
 
@@ -473,7 +478,12 @@ SLOT_MARGIN_MS           = 200     ms
 DEFAULT_GUARD_WINDOW     = 50      ms
 MAX_MISSED_POLLS         = 5
 
+SENSOR_KEY               = 0x01
+BINARY_SENSOR_KEY        = 0x02
 COMMAND_ACK_KEY          = 0x03
+SCHEMA_FINGERPRINT_KEY   = 0x04
+FLOAT_RECORD_SIZE        = 6       bytes (key + index + float32)
+BINARY_RECORD_SIZE       = 3       bytes (key + index + value)
 COMMAND_ENVELOPE_HEADER  = 4       bytes (opcode + cmd_id + payload_len)
 COMMAND_ACK_RECORD_SIZE  = 4       bytes (key + cmd_id + result)
 COMMAND_QUEUE_DEPTH      = 8       per-node FIFO, drop-oldest
