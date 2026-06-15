@@ -66,5 +66,15 @@ static const uint32_t SLOT_MARGIN_MS = 200;
 // Derived from DS3231 ±3.5ppm drift (negligible) + ESP32 loop jitter (~±16ms) + 10ms padding
 static const uint32_t DEFAULT_GUARD_WINDOW_MS = 50;
 
+// Modular forward comparison for anti-replay counters (epoch and seq).
+// True if `candidate` is strictly forward of `reference` within the uint16
+// modular half-space — i.e. (candidate - reference) mod 2^16 is in [1, 2^15].
+// Wraparound-safe: handles 0xFFFF -> 0x0000 as an ordinary +1 step. Never use a
+// plain `>` on epoch/seq, which would brick replay state at the wrap boundary.
+static inline bool is_forward_u16(uint16_t candidate, uint16_t reference) {
+  uint16_t delta = static_cast<uint16_t>(candidate - reference);
+  return delta >= 1u && delta <= 0x8000u;
+}
+
 }  // namespace lora_protocol
 }  // namespace esphome

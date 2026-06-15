@@ -86,12 +86,20 @@ per packet (vs ~1 in 65 536 for the previous 16-bit tag), for 2 extra bytes.
 
 Each receiver stores, per sender, the last accepted `(epoch, seq)`. Acceptance:
 
-- **Newer epoch** (`rx_epoch` is forward of the stored epoch, modular uint16): a
-  new session — accept, reset the window to this packet, and treat the sender as
-  freshly (re)started (the gateway uses this to re-baseline a rebooted node).
-- **Same epoch**, and `(seq − last_seq) mod 2¹⁶ ∈ [1, 2¹⁵]`: forward within the
+- **Newer epoch** (`(rx_epoch − stored_epoch) mod 2¹⁶ ∈ [1, 2¹⁵]`, i.e. forward
+  within the modular half-space — **never** a plain `rx_epoch > stored_epoch`
+  comparison): a new session — accept, reset the window to this packet, and treat
+  the sender as freshly (re)started (the gateway uses this to re-baseline a
+  rebooted node).
+- **Same epoch**, and `(rx_seq − last_seq) mod 2¹⁶ ∈ [1, 2¹⁵]`: forward within the
   session — accept and advance `last_seq`.
 - Otherwise (older epoch, or a non-forward seq): reject as replay / stale.
+
+Both the epoch and seq tests are the **same** modular forward predicate over a
+uint16 half-space — see `is_forward_u16(candidate, reference)` below. Implementing
+either as a plain `>` comparison reintroduces a wraparound cliff (epoch 0xFFFF →
+0x0000, or seq within a long-lived boot) that is decades out and impossible to
+surface in testing, so both receivers MUST use the shared helper.
 - The first packet ever seen from a sender initializes the state and is accepted.
 
 This is **monotonic forward-only** acceptance over a half sequence-space, not a
@@ -120,7 +128,28 @@ lockout**: when a brownout-prone remote restarts, its epoch advances, the gatewa
 sees a newer epoch on the next response and re-baselines immediately — no more
 rejecting a rebooted node's packets until the gateway itself happens to reboot.
 Epoch is 16-bit (65 536 boots; decades even at multiple reboots per day) and is
-covered by the MAC, so it cannot be forged or rolled back by an attacker.
+covered by the MAC, so it cannot be forged or rolled back by an attacker. When the
+epoch counter eventually wraps (0xFFFF → 0x0000) it is simply the next forward step
+under the modular comparison above — there is no exhaustion case to handle.
+
+### Modular Forward Comparison
+
+Both the anti-replay epoch and seq tests use a single shared predicate, defined
+once in `lora_protocol.h` and used identically by gateway and remote node:
+
+```cpp
+// True if `candidate` is strictly forward of `reference` within the uint16
+// modular half-space — i.e. (candidate - reference) mod 2^16 is in [1, 2^15].
+// Wraparound-safe: handles 0xFFFF -> 0x0000 as an ordinary +1 step. Never use a
+// plain `>` on epoch/seq, which would brick replay state at the wrap boundary.
+static inline bool is_forward_u16(uint16_t candidate, uint16_t reference) {
+  uint16_t delta = static_cast<uint16_t>(candidate - reference);
+  return delta >= 1u && delta <= 0x8000u;
+}
+```
+
+`is_forward_u16(rx_epoch, stored_epoch)` selects a newer session; within the same
+epoch, `is_forward_u16(rx_seq, last_seq)` accepts a forward seq.
 
 ### Key Configuration
 
