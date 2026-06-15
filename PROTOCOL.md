@@ -27,10 +27,17 @@ Home Assistant       │  (sensor)   │
 | Address | Usage |
 |---------|-------|
 | `0x01`–`0xFE` | Assignable node addresses (254 usable) |
-| `0xFF` | Broadcast (all nodes listen) |
+| `0xFF` | Reserved / invalid (formerly broadcast — see note) |
 | `0x00` | Reserved / invalid |
 
 Addresses are manually assigned. The user is responsible for uniqueness.
+
+**There are no broadcast frames.** Every packet is unicast between the gateway
+and exactly one node. `0xFF` was previously the broadcast destination for time
+sync; the protocol no longer transmits to it, and a node must reject any packet
+whose destination is not its own address. Anything historically modeled as
+"broadcast" (time/schedule distribution, fan-out commands) is now delivered
+per-node inside each node's own poll exchange.
 
 ## Byte Order
 
@@ -40,48 +47,106 @@ All multi-byte integers use **little-endian** byte order.
 
 All packets are authenticated using **SipHash-2-4** with a mandatory 128-bit (16-byte) pre-shared key configured identically on the gateway and all remote nodes.
 
-### Auth Footer (4 bytes, appended to every packet)
+### Auth Footer (8 bytes, appended to every packet)
 
 ```
-Byte N-3:  Sequence number [7:0]
-Byte N-2:  Sequence number [15:8]   (uint16_t LE)
-Byte N-1:  Auth tag [7:0]
-Byte N:    Auth tag [15:8]          (uint16_t LE)
+Byte N-7:  Boot epoch [7:0]
+Byte N-6:  Boot epoch [15:8]        (uint16_t LE)
+Byte N-5:  Sequence number [7:0]
+Byte N-4:  Sequence number [15:8]   (uint16_t LE)
+Byte N-3:  Auth tag [7:0]
+Byte N-2:  Auth tag [15:8]
+Byte N-1:  Auth tag [23:16]
+Byte N:    Auth tag [31:24]         (uint32_t LE)
 ```
+
+The authenticated counter is the pair `(epoch, seq)`. **Boot epoch** is a
+per-device counter persisted once per boot (see *Counter Persistence*); **seq**
+resets to 0 each boot and increments per transmission (in RAM only).
 
 **Signing procedure:**
 1. Construct packet body (command-specific bytes)
-2. Append 2-byte sequence number (little-endian), increment sender's counter
-3. Compute SipHash-2-4 over (body + seq) using the pre-shared key
-4. Truncate the 64-bit hash to 16 bits (`hash & 0xFFFF`)
-5. Append 2-byte auth tag (little-endian)
+2. Append the 2-byte boot epoch (little-endian)
+3. Append the 2-byte sequence number (little-endian), increment sender's counter
+4. Compute SipHash-2-4 over (body + epoch + seq) using the pre-shared key
+5. Truncate the 64-bit hash to 32 bits (`hash & 0xFFFFFFFF`)
+6. Append the 4-byte auth tag (little-endian)
 
 **Verification procedure:**
-1. Check packet size >= AUTH_OVERHEAD (4 bytes)
-2. Split packet into `body_plus_seq` (all but last 2 bytes) and `tag` (last 2 bytes)
-3. Compute SipHash-2-4 over `body_plus_seq`, compare truncated result to received tag
-4. Extract sequence number from the 2 bytes before the tag
-5. Validate sequence against the sliding window
+1. Check packet size >= AUTH_OVERHEAD (8 bytes)
+2. Split packet into `body_plus_counter` (all but last 4 bytes) and `tag` (last 4 bytes)
+3. Compute SipHash-2-4 over `body_plus_counter`, compare truncated result to received tag
+4. Extract epoch and seq from the 4 bytes before the tag
+5. Validate `(epoch, seq)` against the receiver's per-sender state (below)
+
+The 32-bit tag bounds blind forgery / random false-accept at ~1 in 4.3 billion
+per packet (vs ~1 in 65 536 for the previous 16-bit tag), for 2 extra bytes.
 
 ### Anti-Replay Protection
 
-Each sender maintains a monotonically increasing 16-bit sequence number (wraps at 65535). Each receiver tracks the last accepted sequence per sender using a **sliding window of 256**:
+Each receiver stores, per sender, the last accepted `(epoch, seq)`. Acceptance:
 
-- A packet is accepted if `seq` is within `[last_seq + 1, last_seq + 256]` (modular uint16_t arithmetic)
-- The first packet from a sender is always accepted and initializes the window
-- The gateway tracks sequences **per remote node**; remote nodes track a single gateway sequence
+- **Newer epoch** (`rx_epoch` is forward of the stored epoch, modular uint16): a
+  new session — accept, reset the window to this packet, and treat the sender as
+  freshly (re)started (the gateway uses this to re-baseline a rebooted node).
+- **Same epoch**, and `(seq − last_seq) mod 2¹⁶ ∈ [1, 2¹⁵]`: forward within the
+  session — accept and advance `last_seq`.
+- Otherwise (older epoch, or a non-forward seq): reject as replay / stale.
+- The first packet ever seen from a sender initializes the state and is accepted.
 
-### Gateway Sequence Persistence
+This is **monotonic forward-only** acceptance over a half sequence-space, not a
+bitmap window. Because the MAC prevents forgery, an attacker cannot advance a
+receiver's counter, so there is no benefit to bounding how far forward a genuine
+packet may jump — and the half-space tolerance (~32 000 consecutive losses)
+maximises resilience on a lossy link while still rejecting every replayed or
+out-of-session packet. The protocol is strictly polled (one in-flight packet per
+direction per slot), so out-of-order delivery does not occur and a bitmap is
+unnecessary.
 
-The gateway persists its outbound `tx_seq` high-water mark to NVS in chunks of `TX_SEQ_RESERVE_CHUNK = 256`. Before using a seq value past the saved mark, the next chunk is reserved and flushed, so after an unclean reboot the gateway resumes at most 255 slots ahead of its last used value — never behind it. This prevents remote nodes from rejecting post-reboot packets as replays.
+The gateway tracks `(epoch, seq)` **per remote node** and uses a **per-node
+outbound seq** so each node sees a dense `+1` sequence (not a sparse view of a
+gateway-wide counter shared across all nodes). Remote nodes track a single
+gateway `(epoch, seq)`.
 
-Remote nodes do **not** persist `tx_seq` — on reboot they restart from 0. The gateway's per-node rx window is in-RAM only, so a remote reboot is only transparently absorbed if the *gateway* has also rebooted since last contact (re-initializing the window on first packet). Otherwise, the remote's post-reboot packets will be rejected as out-of-window until its seq counter catches up to the gateway's recorded value. This is a known limitation; remote `tx_seq` persistence or a re-sync handshake may be added later.
+### Counter Persistence
+
+Each device persists only its **boot epoch** — a single NVS write per boot,
+incremented at startup before the first transmission. `seq` is never persisted;
+it restarts at 0 every boot, and the fresh epoch makes that safe.
+
+This symmetric scheme replaces the gateway's former chunked `tx_seq` reservation
+(`TX_SEQ_RESERVE_CHUNK`) entirely and, crucially, **fixes the solar-reboot
+lockout**: when a brownout-prone remote restarts, its epoch advances, the gateway
+sees a newer epoch on the next response and re-baselines immediately — no more
+rejecting a rebooted node's packets until the gateway itself happens to reboot.
+Epoch is 16-bit (65 536 boots; decades even at multiple reboots per day) and is
+covered by the MAC, so it cannot be forged or rolled back by an attacker.
 
 ### Key Configuration
 
 The `auth_key` config option accepts either format:
 - **Hex string**: 32 hex characters (e.g., `"0102030405060708090a0b0c0d0e0f10"`)
 - **Base64**: base64-encoded 16-byte key (e.g., `"AQIDBA..."`)
+
+### Threat Model
+
+- **Goal**: integrity and replay resistance on a private ISM-band link, not
+  confidentiality. Payloads are **not encrypted** — sensor readings and commands
+  travel in clear; SipHash provides authentication only. Don't put secrets in
+  sensor names/values.
+- **MAC strength**: 32-bit tag → ~1 in 4.3e9 forgery/false-accept per packet.
+  Adequate for a low-stakes farm deployment; not a high-value target's defense.
+- **Replay**: prevented by the authenticated `(epoch, seq)` counter. An attacker
+  cannot forge a higher counter without the key, so cannot advance a receiver's
+  window or inject a "newer" packet. Replaying a captured packet fails (its
+  counter is ≤ the receiver's last accepted). Residual risk: a captured packet
+  replayed into the *same slot before* the genuine copy is indistinguishable from
+  it (identical bytes) — harmless, since accepting either is equivalent. Accepted.
+- **Shared key**: a single PSK is shared by the gateway and all nodes. Physically
+  capturing any node exposes the key, allowing impersonation of the gateway to
+  all nodes and any node to the gateway. Per-node keys (the header already
+  carries src/dst, so the receiver can select a key) would limit blast radius;
+  deferred as out of scope for the current deployment.
 
 ## Packet Formats
 
@@ -99,29 +164,52 @@ Byte 2:  Command             (uint8_t)
 
 | Value | Name | Direction | Description |
 |-------|------|-----------|-------------|
-| `0x01` | `CMD_POLL_REQUEST` | Gateway → Node | Request sensor data; optionally carries downlink commands |
-| `0x02` | `CMD_POLL_RESPONSE` | Node → Gateway | Sensor data response; optionally carries command acks |
-| `0x03` | `CMD_TIME_SYNC` | Gateway → Broadcast | Time and schedule sync (the only true broadcast frame) |
-| `0x04` | `CMD_ACK` | Gateway → Node | Response-level acknowledgment of a complete poll response (optional, informational) |
+| `0x01` | `CMD_POLL_REQUEST` | Gateway → Node | Request sensor data; carries schedule, optional time, optional downlink commands |
+| `0x02` | `CMD_POLL_RESPONSE` | Node → Gateway | Sensor data response; carries flags and optional command acks |
 
-> Note: `CMD_ACK` is distinct from the **command acks** that nodes return inside a poll response (see *Downlink Commands* below). `CMD_ACK` confirms "I received your response"; a command ack confirms "I processed the gateway's downlink command."
+Only two frame types exist; both are unicast. The poll request is the gateway's
+sole downlink and absorbs everything that previously needed extra frames —
+schedule (`poll_interval`), wall-clock time (on request), and downlink commands.
+The former `CMD_TIME_SYNC` broadcast and `CMD_ACK` frames are removed.
 
-### Poll Request (7+ bytes, variable)
+### Poll Request Flags (Byte 3)
+
+```
+bit 0  TIME_PRESENT   an epoch-time block follows the schedule field
+bit 1  RESPONSE_ACKED the gateway received this node's previous poll response
+bits 2-7  reserved (must be 0)
+```
+
+`RESPONSE_ACKED` replaces the old standalone ACK frame: receipt confirmation now
+rides the next poll the node is already awake for, costing no extra airtime.
+
+### Poll Request (17+ bytes, variable)
 
 ```
 Byte 0:       Gateway address
 Byte 1:       Target node address (unicast only — see below)
 Byte 2:       0x01 (CMD_POLL_REQUEST)
-Byte 3:       Command count (uint8_t; 0 = bare poll)
-Bytes 4+:     Command envelopes (cmd_count × variable, see Downlink Commands)
-Last 4:       Auth footer
+Byte 3:       Flags (see above)
+Bytes 4-7:    Poll interval in ms (uint32_t LE)         — schedule, always present
+Bytes 8-11:   Unix timestamp, seconds since epoch (uint32_t LE)  — only if TIME_PRESENT
+Byte M:       Command count (uint8_t; 0 = no commands)
+Bytes M+1..:  Command envelopes (cmd_count × variable, see Downlink Commands)
+Last 8:       Auth footer
 ```
 
-When `cmd_count = 0`, no bytes follow before the auth footer and the frame is exactly 7 bytes — the legacy "bare poll" form. When `cmd_count ≥ 1`, one or more command envelopes are appended back-to-back; the remote walks them using each envelope's self-declared length.
+`poll_interval` is carried on **every** poll so a node can (re)derive its entire
+listen schedule from any single poll it receives — there is no separate schedule
+frame and no node-list. The optional 4-byte time block is included only when the
+gateway is answering a node's time request (see *Time Distribution*). A bare poll
+(no time, no commands) is `3 + 1 + 4 + 1 + 8 = 17` bytes.
 
-**Poll requests are unicast only.** The target address must equal a node's own address. Remote nodes must reject poll requests sent to `0xFF`. (Prior revisions of this spec permitted broadcast polls; this is no longer allowed because simultaneous multi-node responses would collide, and commands are distributed per-node through the queue model rather than on the wire.)
+**Poll requests are unicast only.** The target address must equal the node's own
+address; a node must reject any poll whose destination is not its address
+(including `0xFF`). Simultaneous multi-node responses would collide, and commands
+are distributed per-node, so there is never a reason to poll more than one node
+at a time.
 
-### Poll Response (9+ bytes)
+### Poll Response (10+ bytes)
 
 ```
 Byte 0:    Source node address
@@ -129,40 +217,29 @@ Byte 1:    Gateway address
 Byte 2:    0x02 (CMD_POLL_RESPONSE)
 Byte 3:    Packet number (0x00 = single, 0x01+ = multi-packet fragment)
 Byte 4:    Total packets (0x01 = single, 0x02+ = multi-packet)
-Bytes 5+:  Response payload (tagged values — sensor data, command acks, etc.)
-Last 4:    Auth footer
+Byte 5:    Flags (see below)
+Bytes 6+:  Response payload (tagged records — sensor data, command acks, etc.)
+Last 8:    Auth footer
 ```
 
-Maximum payload per packet: **246 bytes** (255 max - 5 header - 4 auth). The payload is a sequence of tagged records (see *Sensor Data Payload Format*); a response to a poll that carried commands **must** begin with the corresponding command acks before any sensor data.
-
-### Time Sync Broadcast (18 + N bytes)
-
-Broadcast to `0xFF`. Includes schedule information for listen window computation.
+### Poll Response Flags (Byte 5)
 
 ```
-Byte 0:      Gateway address
-Byte 1:      0xFF (broadcast)
-Byte 2:      0x03 (CMD_TIME_SYNC)
-Bytes 3-6:   Unix timestamp, seconds since epoch (uint32_t LE)
-Bytes 7-10:  Poll interval in ms (uint32_t LE)
-Bytes 11-12: Slot duration in ms (uint16_t LE)
-Byte 13:     Node count (uint8_t)
-Bytes 14+:   Node addresses in poll order (node_count bytes)
-Last 4:      Auth footer
+bit 0  TIME_REQUEST  node is requesting a wall-clock time update (see Time Distribution)
+bits 1-7  reserved (must be 0)
 ```
 
-### ACK (7 bytes)
+Maximum payload per packet: **241 bytes** (255 max − 6 header − 8 auth). The
+payload is a sequence of tagged records (see *Sensor Data Payload Format*); a
+response to a poll that carried commands **must** begin with the corresponding
+command acks before any other records.
 
-Optional. Sent after receiving a complete poll response.
+### Time Distribution
 
-```
-Byte 0:    Gateway address
-Byte 1:    Target node address
-Byte 2:    0x04 (CMD_ACK)
-Bytes 3-6: Auth footer
-```
-
-ACKs are authenticated (SipHash tag verified) but do **not** advance the remote's gateway sequence window. They are currently informational only; a replayed ACK causes no state change. If ACKs drive retry logic in the future, they must be brought under the replay window.
+There is no time-sync frame. A node that needs its clock set raises `TIME_REQUEST`
+in its poll response; the gateway answers by setting `TIME_PRESENT` and appending
+the 4-byte epoch to that node's **next** poll request. Cadence is node-driven and
+documented under *Listen Windows → Time Sync Policy*.
 
 ## Sensor Data Payload Format
 
@@ -225,7 +302,7 @@ Any non-`ACK_OK` result is terminal for that command — the gateway removes it 
 
 ### Multi-Packet Fragmentation
 
-If serialized sensor data exceeds 246 bytes, it is split across multiple response packets:
+If serialized sensor data exceeds 241 bytes, it is split across multiple response packets:
 - Fragment 1: `packet_num=0x01`, `total_packets=N`
 - Fragment 2: `packet_num=0x02`, `total_packets=N`
 - ...
@@ -250,7 +327,7 @@ A node with no sensors in a valid state sends an empty payload; the gateway stil
 
 The gateway can send commands to remote nodes (set a value, toggle a switch, invoke an action). Because remotes duty-cycle their radios and are only guaranteed to be listening around their own poll slot, commands are **piggybacked onto the poll request** for the target node. A node's next command-delivery opportunity is therefore bounded by one `poll_interval`.
 
-There is **no broadcast frame** for commands. "Broadcast a command to all nodes" is modeled at the gateway as a fanout across per-node queues, not as a single radio transmission. Only time sync uses the `0xFF` address.
+There are **no broadcast frames** at all. "Broadcast a command to all nodes" is modeled at the gateway as a fanout across per-node queues, not as a single radio transmission — each node receives its copy in its own poll.
 
 ### Queue Model
 
@@ -347,7 +424,8 @@ Time:   |-- slot 0 --|-- slot 1 --|-- slot 2 --|--- idle ---|
 
 - The gateway validates at startup that `poll_interval >= cycle_duration`
 - Each node is polled at a deterministic offset: `cycle_start + index * slot_duration`
-- Time sync is broadcast at the start of a new cycle if the sync interval has elapsed
+- Schedule (`poll_interval`) rides every poll; wall-clock time is appended to a
+  node's poll only when that node has requested it (see *Time Distribution*)
 
 ### Poll Interval vs Cycle Duration
 
@@ -365,10 +443,10 @@ Remote nodes can duty-cycle their radio to reduce power consumption. When enable
                         ┌──────────────────┐
         power on ──────▶│  Continuous RX   │◀──── 5 missed polls
                         │  (awaiting       │      (fallback)
-                        │   schedule)      │
+                        │   first poll)    │
                         └───────┬──────────┘
-                                │ first time sync
-                                │ with schedule
+                                │ first poll received
+                                │ (carries poll_interval)
                                 ▼
                         ┌──────────────────┐
               ┌────────▶│  Radio Standby   │
@@ -402,34 +480,105 @@ window_start   = next_poll_time - guard_window / 2
 window_end     = next_poll_time + guard_window / 2
 ```
 
-**Guard window derivation** (default: 50 ms):
+`poll_interval` is taken from the most recent poll (it rides every poll), and the
+window re-anchors on every successful reception — so the only drift that matters
+is what accumulates between two *successfully received* polls.
 
-| Source | Contribution | Notes |
-|--------|-------------|-------|
-| DS3231 RTC drift | ±0.12 ms / 60s | ±2 ppm at 0–40°C, negligible |
-| ESP32 crystal variance | ±1.2 ms / 60s | Negligible |
-| ESPHome `loop()` jitter | ±16 ms | **Dominant factor** |
-| SX1262 standby→RX | ~0.5 ms | STDBY_RC wake time |
-| Safety padding | 10 ms | Account for random variance |
-| **Total** | **~50 ms** | Configurable via `listen_window` |
+**Guard window derivation.** The window must cover clock drift over one
+`poll_interval` plus fixed jitter:
+
+```
+guard_window ≈ 2·(clock_ppm × 1e-6 × poll_interval)   ← drift, scales with interval
+             + 16 ms   (ESPHome loop() jitter)
+             +  0.5 ms (SX1262 STDBY_RC → RX)
+             + 10 ms   (safety padding)
+```
+
+Drift scales with `poll_interval`; the jitter terms do not. At short intervals
+loop jitter dominates and ~50 ms suffices. At long intervals a poor clock
+dominates:
+
+| Clock | ppm | Drift @ 30 s | Drift @ 10 min |
+|-------|-----|-------------|----------------|
+| DS3231 (TCXO) | ±2 | ±0.06 ms | ±1.2 ms |
+| Bare ESP32 osc (outdoor temp) | ±50 | ±1.5 ms | ±30 ms |
+
+**Consequence:** a bare-oscillator node at a long `poll_interval` drifts out of a
+50 ms window and lands in fallback every cycle, burning the power that windowing
+exists to save. Therefore, when `listen_window` is enabled the node **requires an
+RTC** (`has_rtc: true`) unless the computed guard for its `poll_interval` and
+clock class still fits a sane window; the gateway/remote validate this at startup
+and warn or refuse. `clock_ppm` is derived from `has_rtc` (≈2 with RTC, ≈50
+without) and may be overridden; `listen_window` may be given explicitly to
+override the computed guard.
 
 ### Schedule Acquisition
 
-1. Remote node powers on in **continuous RX**
-2. Gateway broadcasts time sync with schedule (poll_interval, slot_duration, node list) — requires `time_sync_interval` configured
-3. Remote node finds its `slot_index` in the address list
-4. First poll expected at `(slot_index + 1) * slot_duration` after time sync
-5. Radio transitions to windowed mode: sleep → wake at window_start → listen → respond → sleep
-6. Timing re-anchors on each successful poll reception (not just time syncs)
+1. Remote node powers on in **continuous RX**.
+2. The gateway polls it in round-robin like any node; the **first poll it
+   receives** carries `poll_interval`, which is all it needs.
+3. It records the poll arrival time and transitions to windowed mode: sleep →
+   wake at `window_start` → listen → respond → sleep.
+4. Timing re-anchors on every successful poll reception.
 
-Once a remote is in windowed mode, its listen window is centered on its *own* poll arrival, not on cycle start. This means subsequent time sync broadcasts at the top of each cycle are usually **not heard** by scheduled remotes (only by nodes still in continuous RX). Time sync is therefore effectively a bootstrap/re-acquisition mechanism; steady-state re-anchoring happens via the polls themselves.
+There is no schedule broadcast, node-list, or slot-index — each node only needs
+*when its own next poll arrives* (`last_poll + poll_interval`), never the network
+topology. This also closes the former time-sync topology leak.
 
 ### Fallback
 
-After **5 consecutive missed polls** (`MAX_MISSED_POLLS`), the node falls back to continuous RX to re-acquire the schedule. This handles:
-- Gateway restarts / schedule changes
-- Significant clock drift accumulation
-- Temporary RF interference
+After **5 consecutive missed polls** (`MAX_MISSED_POLLS`), the node falls back to
+continuous RX to re-acquire. This handles gateway restarts, schedule changes,
+accumulated drift, and RF interference.
+
+**Re-acquisition power cost.** Without a broadcast to catch, a fallen-back node
+must stay in continuous RX until **its own** next unicast poll comes around —
+up to one `poll_interval` of full-power RX. Acceptable for stable nodes; a node
+that repeatedly flaps in and out of fallback at a long interval will spend
+meaningful time in continuous RX, so size `poll_interval`/`listen_window` (and
+fit an RTC) to keep nodes reliably in-window.
+
+### Time Sync Policy
+
+Wall-clock time is delivered on demand (see *Time Distribution*). A node decides
+when to raise `TIME_REQUEST` based on its own hardware — the gateway needs no
+knowledge of which nodes have an RTC:
+
+| Node | Behaviour | Rationale |
+|------|-----------|-----------|
+| **No RTC** | Request after every boot (clock is unset), then every `time_refresh_interval` (default ~1 h) | Crystal drift ~1.7 s/day typ., ~4 s/day worst-case outdoors; loses time on every brownout |
+| **With DS3231** | Request once after boot only if the RTC lost power (oscillator-stop flag); otherwise never | TCXO holds ~1 s per 6 days and is battery-backed across reboots |
+
+The gateway may also enforce a per-node `time_sync_interval` ceiling as a
+belt-and-suspenders backstop. Time sync is purely a wall-clock concern — it is
+**not** needed for listen-window anchoring, which the polls handle.
+
+## Radio Parameters
+
+Spreading factor (SF), bandwidth (BW), and coding rate (CR) are configured on the
+`sx126x` component, not here — but the protocol's timing depends on them, so they
+are documented for cross-reference. The gateway and every node **must** use
+identical SF/BW/CR (and sync word). Time-on-air follows the Semtech LoRa airtime
+equation; payload airtime is quantized into symbols, so trimming a few bytes
+rarely saves airtime while changing SF does so exponentially.
+
+**Derived quantities that depend on SF/BW/CR:**
+- `response_timeout` must exceed the worst-case poll-response airtime (largest
+  snapshot, including any multi-packet fragmentation) plus RX turnaround.
+- `slot_duration = response_timeout + SLOT_MARGIN_MS`, hence `cycle_duration`
+  and the minimum `poll_interval`.
+
+**Sizing guidance (optimize for link margin, not data rate):** payloads are tiny
+and the poll interval is minutes, so a slower SF costs nothing that matters.
+At 125 kHz, rough sensitivity is SF7 ≈ −123 dBm, SF9 ≈ −129, SF12 ≈ −137
+(each +1 SF ≈ +2.5 dB reach for ~2× airtime). Pick the SF that keeps the
+**worst-placed node in its worst position** at ≥ 15–20 dB margin. For a
+sub-¼-mile farm link with some obstruction, **SF9 / 125 kHz / CR 4/5** is a
+reasonable starting point. Don't guess — drive the mobile coop to its worst
+position and read RSSI/SNR from the gateway's liveness metrics at SF7, then let
+the required SF fall out of that measurement. Per-node SF is possible but makes
+`slot_duration` per-node (the gateway must retune between slots); defer until a
+node genuinely needs SF11+ while others are fine.
 
 ## Configuration Reference
 
@@ -437,46 +586,61 @@ After **5 consecutive missed polls** (`MAX_MISSED_POLLS`), the node falls back t
 
 | Option | Type | Required | Default | Description |
 |--------|------|----------|---------|-------------|
-| `sx126x_id` | ID | Yes | — | SX126x radio component |
+| `sx126x_id` | ID | Yes | — | SX126x radio component (SF/BW/CR set here — see *Radio Parameters*) |
 | `address` | hex uint8 | Yes | — | Gateway address (0x01–0xFE) |
 | `auth_key` | string | Yes | — | 16-byte key (hex or base64) |
-| `response_timeout` | time | Yes | — | Max wait for poll response |
+| `response_timeout` | time | Yes | — | Max wait for poll response (must exceed worst-case response airtime) |
 | `poll_interval` | time | Yes | — | Time between polling cycles |
-| `time_id` | ID | No | — | RealTimeClock for time sync |
-| `time_sync_interval` | time | No | — | Interval between time sync broadcasts. **Required** for listen-window remote nodes to acquire a schedule; without it they stay in continuous RX. |
-| `send_ack` | bool | No | `false` | Send ACK after receiving response |
+| `time_id` | ID | No | — | RealTimeClock the gateway reads to answer node time requests |
+| `response_acked` | bool | No | `true` | Set the `RESPONSE_ACKED` flag on the next poll after a received response |
 | `stale_sensor_behavior` | enum | No | `keep` | `keep` or `invalidate` on timeout |
 | `remote_nodes` | list | Yes | — | List of remote node definitions |
+
+Each entry in `remote_nodes` may carry a `time_sync_interval` (optional) — a
+ceiling on how often the gateway will push time to that node even absent a
+`TIME_REQUEST`; omit for purely demand-driven behaviour.
 
 ### Remote Node (`lora_remote_node`)
 
 | Option | Type | Required | Default | Description |
 |--------|------|----------|---------|-------------|
-| `sx126x_id` | ID | Yes | — | SX126x radio component |
+| `sx126x_id` | ID | Yes | — | SX126x radio component (must match the gateway's SF/BW/CR) |
 | `address` | hex uint8 | Yes | — | Node address (0x01–0xFE) |
 | `auth_key` | string | Yes | — | 16-byte key (hex or base64) |
-| `time_id` | ID | No | — | RealTimeClock for time sync |
-| `listen_window` | time | No | disabled | Guard window duration (enables power saving) |
+| `time_id` | ID | No | — | `lora_remote_node` time platform set from gateway time syncs |
+| `has_rtc` | bool | No | `false` | Node has a battery-backed RTC (DS3231); selects clock class and time-sync cadence |
+| `clock_ppm` | int | No | from `has_rtc` | Override clock drift estimate for guard-window sizing (≈2 RTC, ≈50 bare) |
+| `listen_window` | time | No | computed | Guard window override; default computed from `poll_interval` and `clock_ppm` |
+| `time_refresh_interval` | time | No | `1h` | For RTC-less nodes: how often to request a fresh wall-clock time |
 | `sensors` | list | No | `[]` | Sensor IDs to report (declaration order defines float index) |
 | `binary_sensors` | list | No | `[]` | Binary sensor IDs to report (declaration order defines binary index) |
+
+> When `listen_window` is enabled, an RTC is required unless the guard window
+> computed from `poll_interval` and `clock_ppm` still fits a sane bound — see
+> *Listen Windows → Guard window derivation*.
 
 ## Protocol Constants
 
 ```
 AUTH_KEY_SIZE            = 16      bytes
-AUTH_TAG_SIZE            = 2       bytes
+EPOCH_SIZE               = 2       bytes (boot epoch)
 SEQ_NUM_SIZE             = 2       bytes
-AUTH_OVERHEAD            = 4       bytes
-SEQ_WINDOW_SIZE          = 256
-TX_SEQ_RESERVE_CHUNK     = 256     (gateway NVS reservation stride)
+AUTH_TAG_SIZE            = 4       bytes (32-bit truncated SipHash)
+AUTH_OVERHEAD            = 8       bytes (epoch + seq + tag)
+SEQ_FORWARD_WINDOW       = 0x8000  (32768; accept (seq-last) mod 2^16 in [1, this])
 MAX_PACKET_SIZE          = 255     bytes
-MAX_PAYLOAD_SIZE         = 246     bytes
-POLL_REQUEST_MIN_SIZE    = 7       bytes (bare poll, cmd_count=0)
-ACK_PACKET_SIZE          = 7       bytes
-TIME_SYNC_HEADER_SIZE    = 14      bytes (before node list)
+POLL_RESPONSE_HEADER_SIZE= 6       bytes (src + dst + cmd + pkt_num + total + flags)
+MAX_PAYLOAD_SIZE         = 241     bytes (255 - 6 header - 8 auth)
+POLL_REQUEST_MIN_SIZE    = 17      bytes (header + flags + poll_interval + cmd_count + auth)
 SLOT_MARGIN_MS           = 200     ms
-DEFAULT_GUARD_WINDOW     = 50      ms
+DEFAULT_GUARD_WINDOW     = 50      ms (used only when drift fits; else computed)
 MAX_MISSED_POLLS         = 5
+
+# Poll request flags (byte 3)
+PREQ_FLAG_TIME_PRESENT   = 0x01
+PREQ_FLAG_RESPONSE_ACKED = 0x02
+# Poll response flags (byte 5)
+PRESP_FLAG_TIME_REQUEST  = 0x01
 
 SENSOR_KEY               = 0x01
 BINARY_SENSOR_KEY        = 0x02

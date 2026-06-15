@@ -62,10 +62,14 @@ and wire-compatible *with each other*.
 
 ---
 
-## Phase 0 — Finish `PROTOCOL.md`
+## Phase 0 — Finish `PROTOCOL.md` ✅ DONE
 
-The delta→index swap is committed. Remaining spec sections to rewrite to match
-the locked decisions (do this first so code has a stable target):
+Decisions locked: D1 32-bit tag · D2 `poll_interval` every poll · D3 remove
+`CMD_ACK` · D4 schema fingerprint now · D5 `has_rtc` preset · D6 keep both
+`lora_protocol.h` copies in sync.
+
+All sections below are now written into `PROTOCOL.md` (the spec is the source of
+truth; code phases 1–6 implement it):
 
 - **Authentication**: new footer; boot-epoch; monotonic half-space window;
   per-destination counters; tag width (D1); remove chunk persistence. Add a
