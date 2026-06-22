@@ -1,9 +1,7 @@
 #pragma once
 
 #include <algorithm>
-#include <array>
 #include <cstring>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -37,7 +35,6 @@ class LoraRemoteNode : public Component, public sx126x::SX126xListener {
     this->guard_window_ms_ = ms;
     this->listen_window_enabled_ = true;
   }
-  void set_full_update_interval(uint8_t interval) { this->full_update_interval_ = interval; }
 
   void add_sensor(sensor::Sensor *sensor) { this->sensors_.push_back(sensor); }
   void add_binary_sensor(binary_sensor::BinarySensor *sensor) { this->binary_sensors_.push_back(sensor); }
@@ -75,12 +72,10 @@ class LoraRemoteNode : public Component, public sx126x::SX126xListener {
   uint32_t next_listen_end_ms_{0};
   uint8_t consecutive_missed_polls_{0};
 
-  // Delta compression state
-  std::map<std::string, std::array<uint8_t, 4>> last_sent_sensor_values_;
-  std::map<std::string, bool> last_sent_binary_values_;
-  uint8_t full_update_counter_{0};
-  uint8_t full_update_interval_{10};
-  bool force_next_full_update_{true};  // first poll is always full
+  // Schema fingerprint over this node's ordered entities (object_ids), computed
+  // once at setup and sent in every response so the gateway can detect a
+  // declaration-order/identity mismatch.
+  uint16_t schema_fingerprint_{0};
 
   // Auth helpers
   std::vector<uint8_t> sign_packet_(std::vector<uint8_t> body);
@@ -97,8 +92,8 @@ class LoraRemoteNode : public Component, public sx126x::SX126xListener {
   void apply_time_block_(uint32_t timestamp);
 
   // Response building
-  std::vector<std::vector<uint8_t>> build_response_packets_(uint8_t gateway_addr, bool force_full);
-  std::vector<uint8_t> serialize_sensor_data_(bool force_full);
+  std::vector<std::vector<uint8_t>> build_response_packets_(uint8_t gateway_addr);
+  std::vector<uint8_t> serialize_sensor_data_();
 
   // Listen window management
   void compute_next_listen_window_();

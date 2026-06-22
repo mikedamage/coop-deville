@@ -57,9 +57,7 @@ bool LoraRemoteNode::check_gw_seq_(uint16_t epoch, uint16_t seq) {
     this->gw_epoch_ = epoch;
     this->gw_seq_ = seq;
     this->gw_initialized_ = true;
-    // New gateway session — force a full sensor update on next poll
-    this->force_next_full_update_ = true;
-    ESP_LOGD(TAG, "New gateway detected, will send full update on next poll");
+    ESP_LOGD(TAG, "New gateway detected");
     return true;
   }
 
@@ -78,7 +76,6 @@ bool LoraRemoteNode::check_gw_seq_(uint16_t epoch, uint16_t seq) {
     ESP_LOGI(TAG, "Gateway new epoch %u (was %u); re-baselining", epoch, this->gw_epoch_);
     this->gw_epoch_ = epoch;
     this->gw_seq_ = seq;
-    this->force_next_full_update_ = true;
     return true;
   }
 
@@ -104,8 +101,20 @@ void LoraRemoteNode::setup() {
   this->boot_epoch_pref_.save(&this->boot_epoch_);
   this->tx_seq_ = 0;
 
-  ESP_LOGI(TAG, "Remote node configured at address 0x%02X with %d sensors and %d binary sensors", this->address_,
-           this->sensors_.size(), this->binary_sensors_.size());
+  // Compute the schema fingerprint once: float sensors then binary sensors, in
+  // declared order, by object_id. The gateway computes the same over its keys.
+  std::vector<std::string> ids;
+  ids.reserve(this->sensors_.size() + this->binary_sensors_.size());
+  for (auto *sens : this->sensors_) {
+    ids.push_back(sens->get_object_id());
+  }
+  for (auto *sens : this->binary_sensors_) {
+    ids.push_back(sens->get_object_id());
+  }
+  this->schema_fingerprint_ = lora_protocol::compute_schema_fingerprint(this->auth_key_, ids);
+
+  ESP_LOGI(TAG, "Remote node configured at address 0x%02X with %d sensors and %d binary sensors (fingerprint=0x%04X)",
+           this->address_, this->sensors_.size(), this->binary_sensors_.size(), this->schema_fingerprint_);
   if (this->listen_window_enabled_) {
     ESP_LOGI(TAG, "Listen window enabled: guard=%ums", this->guard_window_ms_);
   }
@@ -125,7 +134,7 @@ void LoraRemoteNode::dump_config() {
   } else {
     ESP_LOGCONFIG(TAG, "  Listen Window: disabled (continuous RX)");
   }
-  ESP_LOGCONFIG(TAG, "  Full Update Interval: every %u polls", this->full_update_interval_);
+  ESP_LOGCONFIG(TAG, "  Schema Fingerprint: 0x%04X", this->schema_fingerprint_);
 }
 
 void LoraRemoteNode::loop() {
@@ -254,26 +263,11 @@ void LoraRemoteNode::handle_poll_request_(const std::vector<uint8_t> &packet) {
     ESP_LOGI(TAG, "Schedule acquired from poll; entering windowed listen mode");
   }
 
-  // Determine if this should be a full update
-  bool force_full = this->force_next_full_update_;
-  this->force_next_full_update_ = false;
-
-  if (!force_full) {
-    this->full_update_counter_++;
-    if (this->full_update_counter_ >= this->full_update_interval_) {
-      force_full = true;
-    }
-  }
-
-  if (force_full) {
-    this->full_update_counter_ = 0;
-    ESP_LOGD(TAG, "Sending full sensor update");
-  }
-
   // Mark that we're transmitting a response (prevents listen window from closing)
   this->responding_ = true;
 
-  auto response_packets = this->build_response_packets_(gateway_addr, force_full);
+  // Every response is a full snapshot (no delta); see PROTOCOL.md.
+  auto response_packets = this->build_response_packets_(gateway_addr);
   for (const auto &response : response_packets) {
     this->sx126x_->transmit_packet(response);
     if (response_packets.size() > 1) {
@@ -292,9 +286,9 @@ void LoraRemoteNode::handle_poll_request_(const std::vector<uint8_t> &packet) {
 
 // --- Response building ---
 
-std::vector<std::vector<uint8_t>> LoraRemoteNode::build_response_packets_(uint8_t gateway_addr, bool force_full) {
+std::vector<std::vector<uint8_t>> LoraRemoteNode::build_response_packets_(uint8_t gateway_addr) {
   std::vector<std::vector<uint8_t>> packets;
-  std::vector<uint8_t> payload = this->serialize_sensor_data_(force_full);
+  std::vector<uint8_t> payload = this->serialize_sensor_data_();
 
   // Response flags (byte 5). TIME_REQUEST (demand-driven time sync) lands in
   // Phase 4; for now no flags are raised. Identical on every fragment.
@@ -338,69 +332,40 @@ std::vector<std::vector<uint8_t>> LoraRemoteNode::build_response_packets_(uint8_
   return packets;
 }
 
-std::vector<uint8_t> LoraRemoteNode::serialize_sensor_data_(bool force_full) {
+std::vector<uint8_t> LoraRemoteNode::serialize_sensor_data_() {
   std::vector<uint8_t> data;
-  int skipped = 0;
 
-  for (auto *sens : this->sensors_) {
+  // Schema fingerprint record (first, before any sensor records) so the gateway
+  // can verify the index->entity mapping before publishing.
+  data.push_back(lora_protocol::SCHEMA_FINGERPRINT_KEY);
+  data.push_back(static_cast<uint8_t>(this->schema_fingerprint_ & 0xFF));
+  data.push_back(static_cast<uint8_t>((this->schema_fingerprint_ >> 8) & 0xFF));
+
+  // Full snapshot: every sensor with a valid state, identified by its declared
+  // index (0-based position). Index is the loop position, NOT a running counter,
+  // so a sensor without state simply leaves a gap.
+  for (size_t i = 0; i < this->sensors_.size(); i++) {
+    auto *sens = this->sensors_[i];
     if (!sens->has_state()) {
       continue;
     }
-
     float value = sens->state;
-    std::array<uint8_t, 4> value_bytes{};
-    memcpy(value_bytes.data(), &value, 4);
+    uint8_t value_bytes[4];
+    memcpy(value_bytes, &value, 4);
 
-    std::string name = sens->get_name();
-
-    // Check if value changed since last transmission
-    if (!force_full) {
-      auto it = this->last_sent_sensor_values_.find(name);
-      if (it != this->last_sent_sensor_values_.end() && it->second == value_bytes) {
-        skipped++;
-        continue;
-      }
-    }
-
-    // Serialize this sensor
     data.push_back(lora_protocol::SENSOR_KEY);
-    data.insert(data.end(), value_bytes.begin(), value_bytes.end());
-    data.push_back(static_cast<uint8_t>(name.size()));
-    data.insert(data.end(), name.begin(), name.end());
-
-    // Update cache
-    this->last_sent_sensor_values_[name] = value_bytes;
+    data.push_back(static_cast<uint8_t>(i));
+    data.insert(data.end(), value_bytes, value_bytes + 4);
   }
 
-  for (auto *sens : this->binary_sensors_) {
+  for (size_t i = 0; i < this->binary_sensors_.size(); i++) {
+    auto *sens = this->binary_sensors_[i];
     if (!sens->has_state()) {
       continue;
     }
-
-    bool value = sens->state;
-    std::string name = sens->get_name();
-
-    // Check if value changed since last transmission
-    if (!force_full) {
-      auto it = this->last_sent_binary_values_.find(name);
-      if (it != this->last_sent_binary_values_.end() && it->second == value) {
-        skipped++;
-        continue;
-      }
-    }
-
-    // Serialize this binary sensor
     data.push_back(lora_protocol::BINARY_SENSOR_KEY);
-    data.push_back(value ? 0x01 : 0x00);
-    data.push_back(static_cast<uint8_t>(name.size()));
-    data.insert(data.end(), name.begin(), name.end());
-
-    // Update cache
-    this->last_sent_binary_values_[name] = value;
-  }
-
-  if (skipped > 0) {
-    ESP_LOGD(TAG, "Delta compression: skipped %d unchanged sensor(s), sending %d bytes", skipped, data.size());
+    data.push_back(static_cast<uint8_t>(i));
+    data.push_back(sens->state ? 0x01 : 0x00);
   }
 
   return data;

@@ -54,26 +54,50 @@ class RemoteNode {
   bool get_ack_pending() const { return this->ack_pending_; }
   void set_ack_pending(bool v) { this->ack_pending_ = v; }
 
-  void add_sensor(const std::string &key, sensor::Sensor *sens) { this->sensors_[key] = sens; }
+  // Sensors are stored positionally: declaration order defines the wire index.
+  // The parallel key vectors hold each entity's object_id (the gateway's `key`,
+  // == the remote's object_id) and feed the schema-fingerprint manifest.
+  void add_sensor(const std::string &key, sensor::Sensor *sens) {
+    this->sensor_keys_.push_back(key);
+    this->sensors_.push_back(sens);
+  }
   void add_binary_sensor(const std::string &key, binary_sensor::BinarySensor *sens) {
-    this->binary_sensors_[key] = sens;
+    this->binary_keys_.push_back(key);
+    this->binary_sensors_.push_back(sens);
   }
 
-  sensor::Sensor *find_sensor(const std::string &key) const;
-  binary_sensor::BinarySensor *find_binary_sensor(const std::string &key) const;
-
-  const std::map<std::string, sensor::Sensor *> &get_sensors() const { return this->sensors_; }
-  const std::map<std::string, binary_sensor::BinarySensor *> &get_binary_sensors() const {
-    return this->binary_sensors_;
+  sensor::Sensor *sensor_at(size_t index) const {
+    return index < this->sensors_.size() ? this->sensors_[index] : nullptr;
   }
+  binary_sensor::BinarySensor *binary_sensor_at(size_t index) const {
+    return index < this->binary_sensors_.size() ? this->binary_sensors_[index] : nullptr;
+  }
+
+  const std::vector<sensor::Sensor *> &get_sensors() const { return this->sensors_; }
+  const std::vector<binary_sensor::BinarySensor *> &get_binary_sensors() const { return this->binary_sensors_; }
+
+  // Ordered object_id manifest (float sensors then binary sensors) for the fingerprint.
+  std::vector<std::string> schema_manifest() const {
+    std::vector<std::string> ids;
+    ids.reserve(this->sensor_keys_.size() + this->binary_keys_.size());
+    ids.insert(ids.end(), this->sensor_keys_.begin(), this->sensor_keys_.end());
+    ids.insert(ids.end(), this->binary_keys_.begin(), this->binary_keys_.end());
+    return ids;
+  }
+
+  uint16_t get_expected_fingerprint() const { return this->expected_fingerprint_; }
+  void set_expected_fingerprint(uint16_t fp) { this->expected_fingerprint_ = fp; }
 
  protected:
   uint8_t address_{0};
   std::string name_;
   uint32_t device_id_{0};
   RemoteNodeMetrics metrics_;
-  std::map<std::string, sensor::Sensor *> sensors_;
-  std::map<std::string, binary_sensor::BinarySensor *> binary_sensors_;
+  std::vector<sensor::Sensor *> sensors_;
+  std::vector<binary_sensor::BinarySensor *> binary_sensors_;
+  std::vector<std::string> sensor_keys_;
+  std::vector<std::string> binary_keys_;
+  uint16_t expected_fingerprint_{0};
 
   // Per-node inbound (epoch, seq) tracking for anti-replay
   uint16_t rx_epoch_{0};

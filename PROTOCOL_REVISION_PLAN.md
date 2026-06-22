@@ -94,7 +94,7 @@ truth; code phases 1–6 implement it):
 
 ---
 
-> **Status:** Phase 1 ✅ and Phase 2 ✅ landed on `feat/protocol-robustness-revision`.
+> **Status:** Phases 1 ✅, 2 ✅, 3 ✅ landed on `feat/protocol-robustness-revision`.
 > The **per-destination gateway seq** moved from Phase 1 to Phase 2: it is
 > gateway-internal and invisible on the wire/to the remote, but incompatible with
 > the (then still-present) broadcast time-sync frame, so it landed alongside

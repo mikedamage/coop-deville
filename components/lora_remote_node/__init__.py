@@ -18,7 +18,6 @@ AUTO_LOAD = ["sensor", "binary_sensor", "time"]
 CONF_SX126X_ID = "sx126x_id"
 CONF_AUTH_KEY = "auth_key"
 CONF_LISTEN_WINDOW = "listen_window"
-CONF_FULL_UPDATE_INTERVAL = "full_update_interval"
 
 lora_remote_node_ns = cg.esphome_ns.namespace("lora_remote_node")
 LoraRemoteNode = lora_remote_node_ns.class_(
@@ -69,7 +68,6 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Required(CONF_AUTH_KEY): validate_auth_key,
         cv.Optional(CONF_TIME_ID): cv.use_id(LoraNodeTime),
         cv.Optional(CONF_LISTEN_WINDOW): cv.positive_time_period_milliseconds,
-        cv.Optional(CONF_FULL_UPDATE_INTERVAL, default=10): cv.int_range(min=1, max=255),
         cv.Optional(CONF_SENSORS, default=[]): cv.ensure_list(cv.use_id(sensor.Sensor)),
         cv.Optional(CONF_BINARY_SENSORS, default=[]): cv.ensure_list(
             cv.use_id(binary_sensor.BinarySensor)
@@ -94,8 +92,6 @@ async def to_code(config):
 
     if CONF_LISTEN_WINDOW in config:
         cg.add(var.set_listen_window(config[CONF_LISTEN_WINDOW]))
-
-    cg.add(var.set_full_update_interval(config[CONF_FULL_UPDATE_INTERVAL]))
 
     for sensor_id in config[CONF_SENSORS]:
         sens = await cg.get_variable(sensor_id)

@@ -11,8 +11,15 @@ static const uint8_t CMD_POLL_REQUEST = 0x01;
 static const uint8_t CMD_POLL_RESPONSE = 0x02;
 
 // Payload record tags
-static const uint8_t SENSOR_KEY = 0x01;
-static const uint8_t BINARY_SENSOR_KEY = 0x02;
+static const uint8_t SENSOR_KEY = 0x01;              // [0x01][index][float32 LE]  (6 bytes)
+static const uint8_t BINARY_SENSOR_KEY = 0x02;       // [0x02][index][value]        (3 bytes)
+static const uint8_t COMMAND_ACK_KEY = 0x03;         // [0x03][cmd_id:2][result]    (downlink, planned)
+static const uint8_t SCHEMA_FINGERPRINT_KEY = 0x04;  // [0x04][fingerprint:2 LE]   (3 bytes)
+
+// Sensor record sizes (tag included)
+static const size_t FLOAT_RECORD_SIZE = 6;
+static const size_t BINARY_RECORD_SIZE = 3;
+static const size_t FINGERPRINT_RECORD_SIZE = 3;
 
 // 0xFF is reserved/invalid as an address — there are no broadcast frames.
 static const uint8_t RESERVED_ADDRESS = 0xFF;

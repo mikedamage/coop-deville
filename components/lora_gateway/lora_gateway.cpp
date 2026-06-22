@@ -86,18 +86,6 @@ bool LoraGateway::check_seq_(RemoteNode *node, uint16_t epoch, uint16_t seq) {
   return false;
 }
 
-// --- RemoteNode implementation ---
-
-sensor::Sensor *RemoteNode::find_sensor(const std::string &key) const {
-  auto it = this->sensors_.find(key);
-  return it == this->sensors_.end() ? nullptr : it->second;
-}
-
-binary_sensor::BinarySensor *RemoteNode::find_binary_sensor(const std::string &key) const {
-  auto it = this->binary_sensors_.find(key);
-  return it == this->binary_sensors_.end() ? nullptr : it->second;
-}
-
 // --- LoraGateway implementation ---
 
 void LoraGateway::setup() {
@@ -131,12 +119,14 @@ void LoraGateway::setup() {
     this->poll_interval_ms_ = min_cycle;
   }
 
-  // Register virtual devices for each remote node
+  // Register virtual devices for each remote node and precompute the schema
+  // fingerprint the gateway expects from each node (over its declared keys).
   uint32_t device_id = 1;
   for (auto *node : this->remote_nodes_) {
     node->set_device_id(device_id++);
-    ESP_LOGD(TAG, "Registered virtual device for node %s (0x%02X) with device_id %u", node->get_name().c_str(),
-             node->get_address(), node->get_device_id());
+    node->set_expected_fingerprint(lora_protocol::compute_schema_fingerprint(this->auth_key_, node->schema_manifest()));
+    ESP_LOGD(TAG, "Registered virtual device for node %s (0x%02X) device_id %u, expected fingerprint 0x%04X",
+             node->get_name().c_str(), node->get_address(), node->get_device_id(), node->get_expected_fingerprint());
   }
 
   // Initialize state
@@ -401,75 +391,61 @@ void LoraGateway::process_complete_response_(RemoteNode *node, const std::vector
   while (offset < payload.size()) {
     uint8_t key = payload[offset++];
 
-    if (key == lora_protocol::SENSOR_KEY) {
-      if (offset + 4 >= payload.size()) {
-        ESP_LOGW(TAG, "Incomplete sensor data at offset %d", offset - 1);
+    if (key == lora_protocol::SCHEMA_FINGERPRINT_KEY) {
+      if (offset + 2 > payload.size()) {
+        ESP_LOGW(TAG, "Incomplete schema fingerprint record");
         break;
       }
+      uint16_t fp = static_cast<uint16_t>(payload[offset]) | (static_cast<uint16_t>(payload[offset + 1]) << 8);
+      offset += 2;
+      if (fp != node->get_expected_fingerprint()) {
+        ESP_LOGE(TAG,
+                 "Schema fingerprint mismatch from node %s (0x%02X): got 0x%04X, expected 0x%04X. The remote's "
+                 "entity declaration order/object_ids do not match this gateway's keys; dropping sensor data.",
+                 node->get_name().c_str(), node->get_address(), fp, node->get_expected_fingerprint());
+        return;
+      }
 
+    } else if (key == lora_protocol::SENSOR_KEY) {
+      if (offset + 1 + 4 > payload.size()) {
+        ESP_LOGW(TAG, "Incomplete float sensor record at offset %d", offset - 1);
+        break;
+      }
+      uint8_t index = payload[offset++];
       float value;
       memcpy(&value, &payload[offset], sizeof(float));
       offset += 4;
 
-      if (offset >= payload.size()) {
-        ESP_LOGW(TAG, "Missing name length at offset %d", offset);
-        break;
-      }
-      uint8_t name_len = payload[offset++];
-
-      if (offset + name_len > payload.size()) {
-        ESP_LOGW(TAG, "Incomplete name at offset %d (expected %d bytes, have %d)", offset, name_len,
-                 payload.size() - offset);
-        break;
-      }
-      std::string name(payload.begin() + offset, payload.begin() + offset + name_len);
-      offset += name_len;
-
-      auto *sens = node->find_sensor(name);
+      auto *sens = node->sensor_at(index);
       if (sens != nullptr) {
         sens->publish_state(value);
         sensor_count++;
-        ESP_LOGD(TAG, "  Sensor '%s' = %.2f", name.c_str(), value);
+        ESP_LOGD(TAG, "  Sensor[%u] = %.2f", index, value);
       } else {
-        ESP_LOGW(TAG, "Unknown sensor key '%s' from node %s (0x%02X); declare it in the gateway config to publish it",
-                 name.c_str(), node->get_name().c_str(), node->get_address());
+        ESP_LOGW(TAG, "Float sensor index %u out of range from node %s (0x%02X)", index, node->get_name().c_str(),
+                 node->get_address());
       }
 
     } else if (key == lora_protocol::BINARY_SENSOR_KEY) {
-      if (offset >= payload.size()) {
-        ESP_LOGW(TAG, "Missing binary sensor value at offset %d", offset - 1);
+      if (offset + 1 + 1 > payload.size()) {
+        ESP_LOGW(TAG, "Incomplete binary sensor record at offset %d", offset - 1);
         break;
       }
-
+      uint8_t index = payload[offset++];
       bool value = (payload[offset++] != 0);
 
-      if (offset >= payload.size()) {
-        ESP_LOGW(TAG, "Missing name length at offset %d", offset);
-        break;
-      }
-      uint8_t name_len = payload[offset++];
-
-      if (offset + name_len > payload.size()) {
-        ESP_LOGW(TAG, "Incomplete name at offset %d (expected %d bytes, have %d)", offset, name_len,
-                 payload.size() - offset);
-        break;
-      }
-      std::string name(payload.begin() + offset, payload.begin() + offset + name_len);
-      offset += name_len;
-
-      auto *sens = node->find_binary_sensor(name);
+      auto *sens = node->binary_sensor_at(index);
       if (sens != nullptr) {
         sens->publish_state(value);
         binary_sensor_count++;
-        ESP_LOGD(TAG, "  Binary Sensor '%s' = %s", name.c_str(), value ? "ON" : "OFF");
+        ESP_LOGD(TAG, "  Binary Sensor[%u] = %s", index, value ? "ON" : "OFF");
       } else {
-        ESP_LOGW(TAG,
-                 "Unknown binary sensor key '%s' from node %s (0x%02X); declare it in the gateway config to publish it",
-                 name.c_str(), node->get_name().c_str(), node->get_address());
+        ESP_LOGW(TAG, "Binary sensor index %u out of range from node %s (0x%02X)", index, node->get_name().c_str(),
+                 node->get_address());
       }
 
     } else {
-      ESP_LOGW(TAG, "Unknown key 0x%02X at offset %d, skipping rest of payload", key, offset - 1);
+      ESP_LOGW(TAG, "Unknown record tag 0x%02X at offset %d, skipping rest of payload", key, offset - 1);
       break;
     }
   }
@@ -486,15 +462,15 @@ void LoraGateway::handle_timeout_(RemoteNode *node) {
 
   if (this->stale_behavior_ == StaleSensorBehavior::INVALIDATE) {
     auto &sensors = node->get_sensors();
-    for (auto &kv : sensors) {
-      if (kv.second != nullptr) {
-        kv.second->publish_state(NAN);
+    for (auto *sens : sensors) {
+      if (sens != nullptr) {
+        sens->publish_state(NAN);
       }
     }
     auto &binary_sensors = node->get_binary_sensors();
-    for (auto &kv : binary_sensors) {
-      if (kv.second != nullptr) {
-        kv.second->publish_state(false);
+    for (auto *sens : binary_sensors) {
+      if (sens != nullptr) {
+        sens->publish_state(false);
       }
     }
     ESP_LOGD(TAG, "Invalidated %d sensors and %d binary sensors for node 0x%02X", sensors.size(), binary_sensors.size(),

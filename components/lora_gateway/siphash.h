@@ -2,11 +2,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 // SipHash-2-4: a fast, secure pseudorandom function
 // Reference: https://131002.net/siphash/
 // Used for lightweight packet authentication with a 128-bit pre-shared key.
-// We truncate the 64-bit output to 16 bits for a compact auth tag.
+// The packet auth tag truncates the 64-bit output to 32 bits; the schema
+// fingerprint truncates it to 16 bits.
 
 namespace esphome {
 namespace lora_protocol {
@@ -104,6 +107,20 @@ inline uint64_t siphash_2_4(const uint8_t key[16], const uint8_t *data, size_t l
 // Compute a 32-bit truncated authentication tag
 inline uint32_t compute_auth_tag(const uint8_t key[16], const uint8_t *data, size_t len) {
   return static_cast<uint32_t>(siphash_2_4(key, data, len) & 0xFFFFFFFF);
+}
+
+// Compute the 16-bit schema fingerprint over an ordered entity manifest.
+// `ids` is the node's declared entities in order (all float sensors, then all
+// binary sensors); each contributes [id_len:1][id bytes]. Both gateway and
+// remote must build `ids` identically (gateway: each sensor's key; remote: each
+// sensor's object_id) so the truncated SipHash matches.
+inline uint16_t compute_schema_fingerprint(const uint8_t key[16], const std::vector<std::string> &ids) {
+  std::vector<uint8_t> manifest;
+  for (const auto &id : ids) {
+    manifest.push_back(static_cast<uint8_t>(id.size()));
+    manifest.insert(manifest.end(), id.begin(), id.end());
+  }
+  return static_cast<uint16_t>(siphash_2_4(key, manifest.data(), manifest.size()) & 0xFFFF);
 }
 
 }  // namespace lora_protocol
