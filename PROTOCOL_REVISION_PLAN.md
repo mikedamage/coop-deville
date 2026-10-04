@@ -207,6 +207,91 @@ dropped.
 
 ---
 
+## Future — FCC Part 15 compliance / frequency hopping
+
+*Not part of this revision. Must land before the relay, which reuses the same
+hop sequence on both of its links.*
+
+**Problem:** the current radios run one fixed channel (917.5 MHz) at 125 kHz,
+at +10 dBm (remote) and +3 dBm (gateway) conducted. That fits none of the Part 15
+paths:
+- **§15.247(a)(1) FHSS:** needs ≥ 50 channels, ≤ 0.4 s per channel per 20 s,
+  pseudorandom order, and equal use of every channel.
+- **§15.247(a)(2) digital modulation:** needs a 6 dB bandwidth of at least 500 kHz.
+- **§15.249 low power:** allows only about −1.2 dBm EIRP (50 mV/m at 3 m).
+
+§15.23 waives certification for home-built devices, but not the technical
+standards.
+
+**Interim (config only, no protocol change):** switch to **500 kHz bandwidth** to
+qualify as digital modulation under §15.247(a)(2), raising SF by 2 to keep about
+the same sensitivity and airtime (SF9/500 ≈ SF7/125). Alternatively, drop to
+§15.249 power if the worst-position link margin allows.
+
+**Hopping design sketch (125 kHz, up to 1 W):**
+- **Channel plan:** 64 channels × 200 kHz from 902.3 MHz (the US915 grid).
+  That's ≥ 50 channels, and the spacing exceeds the 20 dB bandwidth.
+- **Hop per exchange:** the poll and its response share one channel. Each
+  exchange must stay ≤ 400 ms, *including* multi-fragment responses
+  (§15.247(g) "continuous data stream"); otherwise hop per fragment.
+- **Sequence:** a keyed permutation of the channel list derived from
+  `auth_key`, cycled in order, which guarantees equal use. Each node's slot
+  offset staggers it into the sequence.
+- **Sync:** the poll carries a `hop_index` alongside `poll_interval`. The node
+  advances it once per elapsed `poll_interval`, missed windows included, so
+  self-anchoring is preserved.
+- **Acquisition (the hard part):** no fixed beacon channel is allowed (equal
+  use).
+  - **Nodes with an RTC:** derive the index as `floor(epoch_time /
+    poll_interval) mod N`, which ties into Phases 4–5.
+  - **Nodes without one:** park on a channel until the sequence comes around
+    (worst case N polls), or the gateway sends long-preamble acquisition polls
+    while the node sweeps channels with CAD.
+- **Driver:** ESPHome's `SX126x::set_frequency()` only stores the value, and
+  `configure()` reprograms the radio (a few ms of SPI). Image calibration is
+  identical across 902–928 MHz.
+
+**Open questions:**
+- Hybrid mode (§15.247(f), LoRaWAN-style with fewer channels): worth it, or too
+  shaky legally?
+- Per-node sequence vs one global sequence offset by slot.
+- Hop-index width.
+- Whether adaptive channel skipping (allowed by §15.247(h)) is worth the
+  complexity.
+
+---
+
+## Future — Scheduled relay (range extension)
+
+*Not part of this revision; captured so the current wire format doesn't paint
+us into a corner.*
+
+**Problem:** the star requires the gateway to reach every node directly. The
+mobile tractor may eventually be parked out of range.
+
+**Approach:** a fixed relay node that stays inside the gateway's schedule
+instead of joining a mesh. The gateway polls the relay in its slot. The relay
+then polls its downstream node(s) in a sub-slot and returns their responses
+in-band, which keeps polling contention-free and deterministic. Downlink
+commands ride the same path. No flooding, no CAD/backoff, no route discovery:
+the route is static config on the gateway (`node → via relay`).
+
+**Open questions for when it's picked up:**
+- Framing: encapsulate the downstream poll/response inside the relay's own
+  (outer auth hop-by-hop, inner end-to-end) vs a `via`/next-hop byte in the
+  header.
+- Auth: does the far node verify the gateway's tag end-to-end, with the relay
+  forwarding opaquely? (Preferred, since a relay compromise then can't forge
+  commands.)
+- Hopping: both relay links follow the FCC hopping sequence above; the
+  sub-slot exchange needs its own hop index/channel.
+- Timing: `slot_duration` for a relayed node ≈ 2× airtime + relay turnaround;
+  listen-window anchoring for the far node comes from the relay's poll.
+- Relay power: it must be awake for its own slot plus the downstream sub-slots
+  only, so it doesn't need continuous RX.
+
+---
+
 ## Per-phase workflow (from CLAUDE.md)
 
 1. `clang-format -i components/**/*.{h,cpp}`
